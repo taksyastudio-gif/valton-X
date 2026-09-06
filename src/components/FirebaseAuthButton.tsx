@@ -1,6 +1,7 @@
 import {
   getRedirectResult,
   onAuthStateChanged,
+  signInWithPopup,
   signInWithRedirect,
   signOut,
   type User,
@@ -108,7 +109,28 @@ export const FirebaseAuthButton: FC = () => {
         await signOut(firebaseAuth);
       } else {
         await configureFirebasePersistence();
-        await signInWithRedirect(firebaseAuth, googleProvider);
+        try {
+          await signInWithPopup(firebaseAuth, googleProvider);
+        } catch (authError: unknown) {
+          const code =
+            typeof authError === 'object' &&
+            authError !== null &&
+            'code' in authError &&
+            typeof authError.code === 'string'
+              ? authError.code
+              : '';
+
+          if (
+            code !== 'auth/popup-blocked' &&
+            code !== 'auth/popup-closed-by-user'
+          ) {
+            throw authError;
+          }
+
+          if (code === 'auth/popup-blocked') {
+            await signInWithRedirect(firebaseAuth, googleProvider);
+          }
+        }
       }
     } catch (authError) {
       setError(getAuthErrorMessage(authError));
