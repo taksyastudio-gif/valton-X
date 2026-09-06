@@ -139,7 +139,11 @@ button {
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
-select:focus-visible {
+select:focus-visible,
+[role="tab"]:focus-visible,
+[role="option"]:focus-visible,
+[role="textbox"]:focus-visible,
+[role="separator"][tabindex]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -147,7 +151,11 @@ select:focus-visible {
 [data-theme="cyberpunk"] button:focus-visible,
 [data-theme="cyberpunk"] input:focus-visible,
 [data-theme="cyberpunk"] textarea:focus-visible,
-[data-theme="cyberpunk"] select:focus-visible {
+[data-theme="cyberpunk"] select:focus-visible,
+[data-theme="cyberpunk"] [role="tab"]:focus-visible,
+[data-theme="cyberpunk"] [role="option"]:focus-visible,
+[data-theme="cyberpunk"] [role="textbox"]:focus-visible,
+[data-theme="cyberpunk"] [role="separator"][tabindex]:focus-visible {
   box-shadow: 0 0 0 4px var(--accent-glow);
 }
 
