@@ -1,6 +1,7 @@
 import {
   Download,
   MessageSquare,
+  Palette,
   Play,
   RotateCcw,
   Square,
@@ -9,10 +10,13 @@ import {
 import type { FC } from 'react';
 
 import { FirebaseAuthButton } from './FirebaseAuthButton';
+import type { EditorTheme } from '../types/byteplay';
 
 interface HeaderControlsProps {
   isRunning: boolean;
+  activeTheme: EditorTheme;
 
+  onThemeChange: (theme: EditorTheme) => void;
   onRun: () => void;
   onClear: () => void;
   onReset: () => void;
@@ -22,6 +26,8 @@ interface HeaderControlsProps {
 
 export const HeaderControls: FC<HeaderControlsProps> = ({
   isRunning,
+  activeTheme,
+  onThemeChange,
   onRun,
   onClear,
   onReset,
@@ -80,6 +86,26 @@ export const HeaderControls: FC<HeaderControlsProps> = ({
               {isRunning ? 'Stop Execution' : 'Run Code'}
             </span>
           </button>
+
+          <label
+            className="secondary-action flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium"
+            title="Change editor theme"
+          >
+            <Palette aria-hidden="true" size={13} />
+            <span className="sr-only">Theme</span>
+            <select
+              aria-label="Editor theme"
+              className="max-w-20 cursor-pointer bg-transparent text-xs outline-none sm:max-w-24"
+              onChange={(event) =>
+                onThemeChange(event.target.value as EditorTheme)
+              }
+              value={activeTheme}
+            >
+              <option value="black">Black</option>
+              <option value="white">White</option>
+              <option value="cyberpunk">Cyberpunk</option>
+            </select>
+          </label>
 
           <button
             aria-label="Clear terminal"

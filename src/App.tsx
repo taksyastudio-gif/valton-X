@@ -325,7 +325,8 @@ export const App = (): ReactElement => {
   const [activeFileId, setActiveFileId] =
     useState(INITIAL_WORKSPACE.activeFileId);
 
-  const [activeTheme] = useState<EditorTheme>(getInitialTheme);
+  const [activeTheme, setActiveTheme] =
+    useState<EditorTheme>(getInitialTheme);
 
   const [terminalPosition, setTerminalPosition] =
     useState<TerminalPosition>('bottom');
@@ -843,7 +844,9 @@ export const App = (): ReactElement => {
   return (
     <div className="app-shell flex h-screen w-screen flex-col overflow-hidden font-sans">
       <HeaderControls
+        activeTheme={activeTheme}
         isRunning={isRunning}
+        onThemeChange={setActiveTheme}
         onClear={handleClearTerminal}
         onExport={() => setIsExportOpen(true)}
         onFeedbackClick={() => setIsFeedbackOpen(true)}
