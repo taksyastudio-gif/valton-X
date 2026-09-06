@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": "20.x"
+  },
   "author": "TAKSYA STUDIO",
   "description": "Valton X - browser-native WebAssembly IDE",
   "scripts": {
