@@ -1,304 +1,193 @@
-import { ErrorInterpreter } from './error-interpreter';
 import type {
   ExecutionResult,
-  RuntimeEvent,
   SupportedLanguage,
 } from './execution-protocol';
 import type { ExecutionCallbacks } from './execution-client';
 
-interface PendingExecution {
-  resolve: (result: ExecutionResult) => void;
-  callbacks?: ExecutionCallbacks;
+export type { ExecutionResult } from './execution-protocol';
+
+/**
+ * Request sent to the C/C++ WASM worker.
+ */
+interface CWorkerRequest {
+  code: string;
+  language: 'c' | 'cpp';
+  /** Upfront/prepared stdin (newline-separated lines). NOT live interactive stdin. */
+  stdin: string;
 }
 
 /**
- * Owns the dedicated C/C++ Web Worker.
+ * Response received from the C/C++ WASM worker.
+ */
+interface CWorkerResponse {
+  success: boolean;
+  output: string;
+  error?: string;
+  exitCode?: number | null;
+}
+
+const EXECUTION_TIMEOUT_MS = 30000;
+
+/**
+ * Manages a single-use Web Worker for each C/C++ compilation + execution run.
  *
- * Worker output and lifecycle events are forwarded immediately to the UI,
- * while the promise resolves only after the complete execution finishes.
+ * The worker uses browsercc (Clang/LLD compiled to WASM) to compile the source
+ * into a WASI binary, then runs it with @bjorn3/browser_wasi_shim.
+ *
+ * stdin is passed upfront before execution – true interactive stdin is not
+ * available via the browser WASM path.
  */
 export class CompilerClient {
+  /** Currently active worker (null when idle). */
   private worker: Worker | null = null;
-  private activeRequestId: string | null = null;
-  private pendingExecution: PendingExecution | null = null;
+  private activeRequest = false;
 
-  constructor() {
-    this.initializeWorker();
-  }
-
-  private initializeWorker(): void {
-    if (typeof Worker === 'undefined') {
-      return;
-    }
-
-    try {
-      this.worker = new Worker(
-        new URL('./compiler.worker.ts', import.meta.url),
-        { type: 'module' },
-      );
-
-      this.worker.addEventListener(
-        'message',
-        (event: MessageEvent<RuntimeEvent>) => {
-          this.handleWorkerEvent(event.data);
-        },
-      );
-
-      this.worker.addEventListener('error', (event) => {
-        this.resolveWorkerFailure(
-          event.message ||
-            'The C/C++ worker stopped unexpectedly.',
-        );
-      });
-    } catch (error: unknown) {
-      this.worker = null;
-
-      const message =
-        error instanceof Error
-          ? error.message
-          : 'Unable to initialize the C/C++ worker.';
-
-      console.error(
-        'C/C++ worker initialization failed:',
-        message,
-      );
-    }
-  }
-
-  public compileAndRun(
+  public async compileAndRun(
     code: string,
     language: SupportedLanguage,
     stdin = '',
     callbacks?: ExecutionCallbacks,
   ): Promise<ExecutionResult> {
-    if (this.pendingExecution) {
-      return Promise.resolve({
+    if (this.activeRequest) {
+      return {
         success: false,
-        output:
-          '[Execution Error] A C/C++ program is already running. Stop it before starting another run.',
+        output: '',
         error: 'A C/C++ execution is already active.',
         exitCode: null,
         status: 'failed',
         phase: 'run',
-      });
+      };
     }
 
-    if (!this.worker) {
-      return Promise.resolve({
-        success: false,
-        output:
-          '[Execution Error] The browser C/C++ worker is unavailable. Refresh the page and try again.',
-        error: 'C/C++ worker is unavailable.',
-        exitCode: null,
-        status: 'infrastructure-error',
-        phase: 'compile',
-      });
+    this.activeRequest = true;
+    callbacks?.onStatus?.('compiling');
+
+    try {
+      const result = await this.runWorker(code, language, stdin, callbacks);
+      callbacks?.onStatus?.(result.status);
+      return result;
+    } finally {
+      this.activeRequest = false;
     }
+  }
 
-    const requestId = this.createRequestId();
+  private runWorker(
+    code: string,
+    language: SupportedLanguage,
+    stdin: string,
+    callbacks?: ExecutionCallbacks,
+  ): Promise<ExecutionResult> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
-    return new Promise<ExecutionResult>((resolve) => {
-      this.activeRequestId = requestId;
-      this.pendingExecution = {
-        resolve,
-        callbacks,
+      const worker = new Worker(
+        new URL('./compiler.worker.ts', import.meta.url),
+        { type: 'module' },
+      );
+
+      this.worker = worker;
+
+      const finish = (result: ExecutionResult): void => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        worker.terminate();
+
+        if (this.worker === worker) {
+          this.worker = null;
+        }
+
+        resolve(result);
+      };
+
+      worker.onmessage = (
+        event: MessageEvent<CWorkerResponse>,
+      ): void => {
+        const data = event.data;
+        const output = data.output ?? '';
+
+        if (output) {
+          callbacks?.onOutput?.('stdout', output, 1);
+        }
+
+        finish({
+          success: data.success,
+          output,
+          error: data.success ? undefined : (data.error ?? 'C/C++ execution failed.'),
+          exitCode: data.exitCode ?? (data.success ? 0 : 1),
+          status: data.success ? 'completed' : 'failed',
+          phase: data.success ? 'run' : 'compile',
+        });
+      };
+
+      worker.onerror = (event): void => {
+        finish({
+          success: false,
+          output: '',
+          error:
+            event.message ||
+            'The C/C++ worker stopped unexpectedly.',
+          exitCode: null,
+          status: 'infrastructure-error',
+          phase: 'run',
+        });
       };
 
       try {
-        this.worker?.postMessage({
-          type: 'compile',
-          requestId,
+        const request: CWorkerRequest = {
           code,
-          language,
+          language: (language === 'cpp' ? 'cpp' : 'c') as 'c' | 'cpp',
           stdin,
-        });
-      } catch (error: unknown) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : 'Unable to send the program to the C/C++ worker.';
+        };
 
-        this.resolveWorkerFailure(message);
+        worker.postMessage(request);
+
+        timeoutId = setTimeout(() => {
+          finish({
+            success: false,
+            output: '',
+            error: `Execution timed out after ${EXECUTION_TIMEOUT_MS / 1000} seconds.`,
+            exitCode: null,
+            status: 'timeout',
+            phase: 'run',
+          });
+        }, EXECUTION_TIMEOUT_MS);
+      } catch (error: unknown) {
+        finish({
+          success: false,
+          output: '',
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Unable to start C/C++ execution.',
+          exitCode: null,
+          status: 'infrastructure-error',
+          phase: 'run',
+        });
       }
     });
   }
 
-  public sendInput(input: string): void {
-    if (
-      !this.worker ||
-      !this.activeRequestId ||
-      !this.pendingExecution
-    ) {
-      return;
-    }
-
-    try {
-      this.worker.postMessage({
-        type: 'stdin',
-        requestId: this.activeRequestId,
-        input,
-      });
-    } catch (error: unknown) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : 'Unable to send input to the C/C++ worker.';
-
-      this.resolveWorkerFailure(message);
-    }
+  /** stdin is upfront – live input is not available via the browser C runtime. */
+  public sendInput(_input: string): void {
+    // No-op: C/C++ stdin is provided before execution, not during.
   }
 
   public stopCurrent(): void {
-    if (!this.pendingExecution) {
-      return;
-    }
-
-    const pendingExecution = this.pendingExecution;
-
-    this.pendingExecution = null;
-    this.activeRequestId = null;
-
-    pendingExecution.resolve({
-      success: false,
-      output: '[VLNTOX] Execution stopped.',
-      error: 'Execution stopped by the user.',
-      exitCode: null,
-      status: 'stopped',
-      phase: 'run',
-    });
-
     this.worker?.terminate();
     this.worker = null;
-    this.initializeWorker();
-  }
-
-  private handleWorkerEvent(event: RuntimeEvent): void {
-    const pendingExecution = this.pendingExecution;
-
-    if (
-      !pendingExecution ||
-      !this.activeRequestId ||
-      event.requestId !== this.activeRequestId
-    ) {
-      return;
-    }
-
-    if (event.type === 'stream') {
-      pendingExecution.callbacks?.onOutput?.(
-        event.stream,
-        event.text,
-        event.attempt,
-      );
-      return;
-    }
-
-    if (event.type === 'status') {
-      pendingExecution.callbacks?.onStatus?.(event.status);
-      return;
-    }
-
-    const result = this.createExecutionResult(event);
-
-    pendingExecution.callbacks?.onStatus?.(result.status);
-
-    if (event.waitingForInput) {
-      pendingExecution.callbacks?.onStatus?.('waiting-input');
-      return;
-    }
-
-    this.pendingExecution = null;
-    this.activeRequestId = null;
-    pendingExecution.resolve(result);
-  }
-
-  private createExecutionResult(
-    event: Extract<RuntimeEvent, { type: 'result' }>,
-  ): ExecutionResult {
-    if (event.success) {
-      return {
-        success: true,
-        output:
-          event.output || 'Program completed with no output.',
-        error: event.error,
-        warnings: event.warnings,
-        exitCode: event.exitCode ?? 0,
-        waitingForInput: event.waitingForInput ?? false,
-        status: event.status,
-        phase: event.phase ?? 'run',
-      };
-    }
-
-    const rawError = event.error || event.output;
-    const insight = ErrorInterpreter.parse(rawError, 'c');
-
-    const friendlyOutput = [
-      `${insight.emoji} ${insight.humorousTitle}`,
-      '',
-      `What happened: ${insight.friendlyExplanation}`,
-      `Quick fix: ${insight.suggestedFix}`,
-      '',
-      '---------------- Raw Compiler Output ----------------',
-      rawError,
-    ].join('\n');
-
-    return {
-      success: false,
-      output: event.waitingForInput
-        ? event.output
-        : friendlyOutput,
-      error: rawError,
-      warnings: event.warnings,
-      exitCode: event.exitCode ?? 1,
-      waitingForInput: event.waitingForInput ?? false,
-      status: event.status,
-      phase: event.phase ?? 'compile',
-    };
-  }
-
-  private resolveWorkerFailure(message: string): void {
-    if (!this.pendingExecution) {
-      return;
-    }
-
-    const pendingExecution = this.pendingExecution;
-
-    this.pendingExecution = null;
-    this.activeRequestId = null;
-
-    pendingExecution.callbacks?.onStatus?.(
-      'infrastructure-error',
-    );
-
-    pendingExecution.resolve({
-      success: false,
-      output: `[C/C++ Worker Error] ${message}`,
-      error: message,
-      exitCode: null,
-      status: 'infrastructure-error',
-      phase: 'compile',
-    });
-  }
-
-  private createRequestId(): string {
-    if (
-      typeof crypto !== 'undefined' &&
-      'randomUUID' in crypto
-    ) {
-      return crypto.randomUUID();
-    }
-
-    return `c-run-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2)}`;
+    this.activeRequest = false;
   }
 
   public terminate(): void {
-    this.resolveWorkerFailure(
-      'C/C++ execution was stopped by the application.',
-    );
-
-    this.worker?.terminate();
-    this.worker = null;
+    this.stopCurrent();
   }
 }
 

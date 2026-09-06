@@ -1,540 +1,183 @@
+/**
+ * compiler.worker.ts
+ *
+ * Browser-native C/C++ execution worker.
+ *
+ * Pipeline:
+ *   compiler-client → postMessage({ code, language, stdin })
+ *   → browsercc.compile()   (Clang + LLD in WASM, produces a WASI module)
+ *   → WASI.start()          (@bjorn3/browser_wasi_shim)
+ *   → postMessage({ success, output, error, exitCode })
+ *
+ * stdin is upfront/prepared — it is provided before execution begins.
+ * This is NOT live/interactive stdin. The UI must represent it accordingly.
+ */
+
+import { compile } from 'browsercc';
 import {
-  Clang,
-  LLD,
-  getCompilerInvocation,
-  setUpSysroot,
-} from 'browsercc';
-import {
-  ConsoleStdout,
+  WASI,
   File,
   OpenFile,
-  WASI,
-  WASIProcExit,
+  ConsoleStdout,
+  PreopenDirectory,
 } from '@bjorn3/browser_wasi_shim';
 
-import type {
-  ExecutionPhase,
-  ExecutionStatus,
-  OutputStream,
-  RuntimeEvent,
-  RuntimeRequest,
-  SupportedLanguage,
-} from './execution-protocol';
+interface WorkerRequest {
+  code: string;
+  language: 'c' | 'cpp';
+  /** Upfront/prepared stdin content (newline-separated lines). */
+  stdin?: string;
+}
 
-type CompilerInstance = Awaited<ReturnType<typeof Clang>>;
-type LinkerInstance = Awaited<ReturnType<typeof LLD>>;
-
-interface CompilerRunResult {
+interface WorkerResponse {
   success: boolean;
   output: string;
   error?: string;
-  warnings?: string;
   exitCode?: number | null;
-  waitingForInput?: boolean;
-  status: ExecutionStatus;
-  phase: ExecutionPhase;
 }
 
-interface ExecutionSession {
-  code: string;
-  language: SupportedLanguage;
-  stdin: string;
-  attempt: number;
-}
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
-const textEncoder = new TextEncoder();
-const executionSessions = new Map<string, ExecutionSession>();
+/**
+ * Runs a compiled WASI module with the provided stdin.
+ * Returns { stdout, stderr, exitCode }.
+ */
+const runWasiModule = (
+  module: WebAssembly.Module,
+  stdin: string,
+): { stdout: string; stderr: string; exitCode: number } => {
+  let stdoutBuf = '';
+  let stderrBuf = '';
 
-let sysrootPromise: Promise<ArrayBuffer> | null = null;
-let executionQueue: Promise<void> = Promise.resolve();
+  const stdinBytes = encoder.encode(stdin.endsWith('\n') ? stdin : `${stdin}\n`);
 
-class StdinRequiredError extends Error {
-  constructor() {
-    super('stdin is waiting for more input');
-    this.name = 'StdinRequiredError';
-  }
-}
+  const fds = [
+    // fd 0 – stdin: prepared input file
+    new OpenFile(new File(stdinBytes)),
+    // fd 1 – stdout
+    new ConsoleStdout((chunk: Uint8Array) => {
+      stdoutBuf += decoder.decode(chunk);
+    }),
+    // fd 2 – stderr
+    new ConsoleStdout((chunk: Uint8Array) => {
+      stderrBuf += decoder.decode(chunk);
+    }),
+    // fd 3 – preopened '.' directory (required by many C runtimes)
+    new PreopenDirectory('.', new Map()),
+  ];
 
-class InteractiveStdinFile extends File {
-  constructor() {
-    super(new Uint8Array());
-  }
+  const wasi = new WASI([], [], fds);
 
-  public append(data: Uint8Array): void {
-    const next = new Uint8Array(this.data.length + data.length);
-
-    next.set(this.data, 0);
-    next.set(data, this.data.length);
-    this.data = next;
-  }
-}
-
-class InteractiveOpenFile extends OpenFile {
-  public fd_read(size: number): { ret: number; data: Uint8Array } {
-    const start = Number(this.file_pos);
-    const end = Math.min(this.file.data.length, start + size);
-    const data = this.file.data.slice(start, end);
-
-    if (data.length === 0) {
-      throw new StdinRequiredError();
-    }
-
-    this.file_pos += BigInt(data.length);
-
-    return {
-      ret: 0,
-      data,
-    };
-  }
-}
-
-const postEvent = (event: RuntimeEvent): void => {
-  self.postMessage(event);
-};
-
-const postStatus = (
-  requestId: string,
-  status: ExecutionStatus,
-  attempt: number,
-): void => {
-  postEvent({
-    type: 'status',
-    requestId,
-    status,
-    attempt,
-  });
-};
-
-const postStream = (
-  requestId: string,
-  stream: OutputStream,
-  text: string,
-  attempt: number,
-): void => {
-  if (!text) {
-    return;
-  }
-
-  postEvent({
-    type: 'stream',
-    requestId,
-    stream,
-    text,
-    attempt,
-  });
-};
-
-const enqueue = (task: () => Promise<void>): void => {
-  executionQueue = executionQueue.then(task, task);
-};
-
-const getClang = async (
-  onStderr: (text: string) => void,
-): Promise<CompilerInstance> =>
-  Clang({
-    thisProgram: 'clang',
-    printErr: onStderr,
-    locateFile: (path: string) =>
-      path.endsWith('clang.wasm') ? '/clang.wasm' : path,
-  }) as Promise<CompilerInstance>;
-
-const getLinker = async (
-  onStderr: (text: string) => void,
-): Promise<LinkerInstance> =>
-  LLD({
-    thisProgram: 'wasm-ld',
-    printErr: onStderr,
-    locateFile: (path: string) =>
-      path.endsWith('lld.wasm') ? '/lld.wasm' : path,
-  }) as Promise<LinkerInstance>;
-
-const getSysroot = async (): Promise<ArrayBuffer> => {
-  if (!sysrootPromise) {
-    sysrootPromise = fetch('/sysroot.tar')
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(
-            `Unable to load compiler sysroot (${response.status}).`,
-          );
-        }
-
-        return response.arrayBuffer();
-      })
-      .catch((error: unknown) => {
-        sysrootPromise = null;
-        throw error;
-      });
-  }
-
-  return sysrootPromise;
-};
-
-const getSourceFilename = (language: SupportedLanguage): string =>
-  language === 'cpp' ? 'main.cpp' : 'main.c';
-
-const createCompilerInvocation = async (
-  language: SupportedLanguage,
-  code: string,
-): Promise<Awaited<ReturnType<typeof getCompilerInvocation>>> => {
-  const filename = getSourceFilename(language);
-  const invocation = await getCompilerInvocation(filename, code, []);
-
-  const cxxFlags = new Set([
-    '-std=c++98',
-    '-std=c++03',
-    '-std=c++11',
-    '-std=c++14',
-    '-std=c++17',
-    '-std=c++20',
-    '-std=c++23',
-    '-std=gnu++98',
-    '-std=gnu++03',
-    '-std=gnu++11',
-    '-std=gnu++14',
-    '-std=gnu++17',
-    '-std=gnu++20',
-    '-std=gnu++23',
-  ]);
-
-  invocation.compilerArgs = invocation.compilerArgs.filter(
-    (argument) => !cxxFlags.has(argument),
-  );
-
-  invocation.compilerArgs.push(
-    '-x',
-    language === 'cpp' ? 'c++' : 'c',
-    language === 'cpp' ? '-std=c++17' : '-std=c17',
-  );
-
-  return invocation;
-};
-
-const createStdinFile = (stdin: string): OpenFile => {
-  const file = new InteractiveStdinFile();
-  const normalizedInput =
-    stdin && !stdin.endsWith('\n') ? `${stdin}\n` : stdin;
-
-  file.append(textEncoder.encode(normalizedInput));
-  return new InteractiveOpenFile(file);
-};
-
-const isStdinRequiredError = (error: unknown): boolean => {
-  if (error instanceof StdinRequiredError) {
-    return true;
-  }
-
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes('stdin is waiting for more input');
-};
-
-const compileAndRun = async (
-  session: ExecutionSession,
-  requestId: string,
-): Promise<CompilerRunResult> => {
-  let compilerStderr = '';
-  let linkerStderr = '';
-
+  let exitCode: number;
   try {
-    const [clang, linker, sysroot] = await Promise.all([
-      getClang((text) => {
-        compilerStderr += `${text}\n`;
-      }),
-      getLinker((text) => {
-        linkerStderr += `${text}\n`;
-      }),
-      getSysroot(),
-    ]);
-
-    const invocation = await createCompilerInvocation(
-      session.language,
-      session.code,
-    );
-
-    const sourceFilename = getSourceFilename(session.language);
-
-    clang.FS.writeFile(sourceFilename, session.code);
-    setUpSysroot(clang, sysroot);
-
-    postStatus(requestId, 'compiling', session.attempt);
-
-    const compileExitCode = clang.callMain(invocation.compilerArgs);
-
-    if (compileExitCode !== 0) {
-      const error = compilerStderr.trim() || 'Compilation failed.';
-
-      return {
-        success: false,
-        output: error,
-        error,
-        exitCode: compileExitCode,
-        status: 'failed',
-        phase: 'compile',
-      };
-    }
-
-    const objectFile = clang.FS.readFile(
-      invocation.compilerArtifact,
-      { encoding: 'binary' },
-    );
-
-    linker.FS.writeFile(invocation.compilerArtifact, objectFile);
-    setUpSysroot(linker, sysroot);
-
-    postStatus(requestId, 'compiling', session.attempt);
-
-    const linkExitCode = linker.callMain(invocation.linkerArgs);
-
-    if (linkExitCode !== 0) {
-      const error = linkerStderr.trim() || 'Linking failed.';
-
-      return {
-        success: false,
-        output: error,
-        error,
-        exitCode: linkExitCode,
-        status: 'failed',
-        phase: 'link',
-      };
-    }
-
-    const executable = linker.FS.readFile(
-      invocation.linerArtifact,
-      { encoding: 'binary' },
-    );
-
-    const wasmModule = await WebAssembly.compile(executable);
-    const stdoutChunks: string[] = [];
-    const stderrChunks: string[] = [];
-
-    const stdoutDecoder = new TextDecoder();
-    const stderrDecoder = new TextDecoder();
-
-    const stdout = new ConsoleStdout((buffer) => {
-      const text = stdoutDecoder.decode(buffer, { stream: true });
-
-      if (text) {
-        stdoutChunks.push(text);
-        postStream(
-          requestId,
-          'stdout',
-          text,
-          session.attempt,
-        );
-      }
-    });
-
-    const stderr = new ConsoleStdout((buffer) => {
-      const text = stderrDecoder.decode(buffer, { stream: true });
-
-      if (text) {
-        stderrChunks.push(text);
-        postStream(
-          requestId,
-          'stderr',
-          text,
-          session.attempt,
-        );
-      }
-    });
-
-    const wasi = new WASI(
-      ['main'],
-      [],
-      [createStdinFile(session.stdin), stdout, stderr],
-    );
-
-    const instance = await WebAssembly.instantiate(wasmModule, {
+    const instance = new WebAssembly.Instance(module, {
       wasi_snapshot_preview1: wasi.wasiImport,
     });
 
-    postStatus(requestId, 'running', session.attempt);
+    const typedInstance = instance as {
+      exports: { memory: WebAssembly.Memory; _start: () => unknown };
+    };
 
-    let exitCode = 0;
+    exitCode = wasi.start(typedInstance) ?? 0;
+  } catch (error: unknown) {
+    // WASIProcExit is the normal path for programs that call exit(n).
+    const name = error instanceof Error ? error.constructor.name : '';
+    const code =
+      error instanceof Error &&
+      'code' in error &&
+      typeof (error as { code: unknown }).code === 'number'
+        ? (error as { code: number }).code
+        : 1;
 
-    try {
-      wasi.start(
-        instance as unknown as {
-          exports: {
-            memory: WebAssembly.Memory;
-            _start: () => unknown;
-          };
-        },
-      );
-    } catch (error: unknown) {
-      if (isStdinRequiredError(error)) {
-        return {
-          success: false,
-          output: stdoutChunks.join(''),
-          error: '',
-          exitCode: null,
-          waitingForInput: true,
-          status: 'waiting-input',
-          phase: 'run',
-        };
-      }
-
-      if (error instanceof WASIProcExit) {
-        exitCode = error.code;
-      } else {
-        throw error;
-      }
+    if (name === 'WASIProcExit') {
+      exitCode = code;
+    } else {
+      // Genuine runtime crash – record message in stderr
+      const msg =
+        error instanceof Error ? error.message : String(error);
+      stderrBuf += `\n[Runtime error] ${msg}`;
+      exitCode = 1;
     }
+  }
 
-    const output = stdoutChunks.join('');
-    const runtimeError = stderrChunks.join('').trim();
+  return { stdout: stdoutBuf, stderr: stderrBuf, exitCode };
+};
 
-    if (runtimeError || exitCode !== 0) {
-      const error =
-        runtimeError || `Program exited with code ${exitCode}.`;
+self.onmessage = async (
+  event: MessageEvent<WorkerRequest>,
+): Promise<void> => {
+  const { code, language, stdin = '' } = event.data;
 
-      return {
-        success: false,
-        output: output || error,
-        error,
-        exitCode,
-        status: 'failed',
-        phase: 'run',
-      };
-    }
+  const fileName =
+    language === 'cpp' ? 'main.cpp' : 'main.c';
 
-    return {
-      success: true,
-      output,
-      warnings: compilerStderr.trim() || undefined,
-      exitCode,
-      status: 'completed',
-      phase: 'run',
+  // Compiler flags: C99 for .c, C++17 for .cpp
+  const flags =
+    language === 'cpp'
+      ? [
+          '-x',
+          'c++',
+          '-std=c++17',
+          '-O1',
+          '-Wall',
+          '-fno-exceptions',
+        ]
+      : ['-x', 'c++', '-std=c++17', '-O1', '-Wall'];
+
+  let compileResult: { compileOutput: string; module: WebAssembly.Module | null };
+
+  try {
+    const result = await compile({ source: code, fileName, flags });
+    compileResult = {
+      compileOutput: result.compileOutput ?? '',
+      module: result.module,
     };
   } catch (error: unknown) {
-    const message =
+    const msg =
       error instanceof Error ? error.message : String(error);
-    const finalError =
-      compilerStderr.trim() || linkerStderr.trim() || message;
-
-    return {
+    const response: WorkerResponse = {
       success: false,
-      output: finalError,
-      error: finalError,
+      output: '',
+      error: `[Compiler internal error] ${msg}`,
       exitCode: null,
-      status: 'failed',
-      phase: 'compile',
     };
-  }
-};
-
-const finishSession = (
-  requestId: string,
-  session: ExecutionSession,
-  result: CompilerRunResult,
-): void => {
-  postEvent({
-    type: 'result',
-    requestId,
-    success: result.success,
-    output: result.output,
-    error: result.error,
-    warnings: result.warnings,
-    exitCode: result.exitCode ?? null,
-    waitingForInput: result.waitingForInput ?? false,
-    status: result.status,
-    phase: result.phase,
-  });
-
-  if (result.waitingForInput) {
-    session.attempt += 1;
-  } else {
-    executionSessions.delete(requestId);
-  }
-};
-
-const runSession = async (
-  requestId: string,
-  session: ExecutionSession,
-): Promise<void> => {
-  const result = await compileAndRun(session, requestId);
-  finishSession(requestId, session, result);
-};
-
-const failSession = (
-  requestId: string,
-  attempt: number,
-  error: unknown,
-): void => {
-  const message = error instanceof Error ? error.message : String(error);
-
-  postStatus(requestId, 'failed', attempt);
-  postEvent({
-    type: 'result',
-    requestId,
-    success: false,
-    output: message,
-    error: message,
-    exitCode: null,
-    waitingForInput: false,
-    status: 'failed',
-    phase: 'run',
-  });
-
-  executionSessions.delete(requestId);
-};
-
-const handleCompile = (
-  request: Extract<RuntimeRequest, { type: 'compile' }>,
-): void => {
-  const session: ExecutionSession = {
-    code: request.code,
-    language: request.language === 'cpp' ? 'cpp' : 'c',
-    stdin: request.stdin ?? '',
-    attempt: 1,
-  };
-
-  executionSessions.set(request.requestId, session);
-
-  enqueue(async () => {
-    try {
-      await runSession(request.requestId, session);
-    } catch (error: unknown) {
-      failSession(request.requestId, session.attempt, error);
-    }
-  });
-};
-
-const handleStdin = (
-  request: Extract<RuntimeRequest, { type: 'stdin' }>,
-): void => {
-  const session = executionSessions.get(request.requestId);
-
-  if (!session) {
+    self.postMessage(response);
     return;
   }
 
-  session.stdin += `${request.input}\n`;
+  const { compileOutput, module } = compileResult;
 
-  enqueue(async () => {
-    try {
-      await runSession(request.requestId, session);
-    } catch (error: unknown) {
-      failSession(request.requestId, session.attempt, error);
-    }
-  });
+  // Compilation failed (module is null) – send compiler diagnostics.
+  if (!module) {
+    const response: WorkerResponse = {
+      success: false,
+      output: compileOutput,
+      error: compileOutput || 'Compilation failed with no diagnostic output.',
+      exitCode: null,
+    };
+    self.postMessage(response);
+    return;
+  }
+
+  // Compilation succeeded – execute with WASI.
+  const { stdout, stderr, exitCode } = runWasiModule(module, stdin);
+
+  // Combine stdout + stderr into a single output string so the terminal
+  // receives them in a reasonable order.  stderr is appended after stdout
+  // unless stdout is empty, in which case only stderr is shown.
+  const combinedOutput = stderr
+    ? stdout
+      ? `${stdout}\n[stderr]\n${stderr}`
+      : stderr
+    : stdout;
+
+  const response: WorkerResponse = {
+    success: exitCode === 0,
+    output: combinedOutput,
+    error: exitCode !== 0 ? (stderr || compileOutput || 'Non-zero exit code.') : undefined,
+    exitCode,
+  };
+
+  self.postMessage(response);
 };
-
-self.addEventListener(
-  'message',
-  (event: MessageEvent<RuntimeRequest>) => {
-    const request = event.data;
-
-    if (!request) {
-      return;
-    }
-
-    if (request.type === 'stdin') {
-      handleStdin(request);
-      return;
-    }
-
-    if (request.type === 'compile') {
-      handleCompile(request);
-    }
-  },
-);

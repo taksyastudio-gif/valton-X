@@ -231,7 +231,7 @@ export const ConsolePreviewPanel: FC<
               referrerPolicy="no-referrer"
               sandbox="allow-scripts allow-modals"
               srcDoc={documentToRender}
-              title="VLNTOX web project preview"
+              title="Valton X web project preview"
             />
           ) : (
             <div className="flex h-full items-center justify-center bg-slate-950 p-4 text-center text-xs italic text-slate-400">

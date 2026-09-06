@@ -56,7 +56,7 @@ export const FriendlyErrorPanel: FC<
 
   return (
     <section
-      aria-label="VLNTOX Error Doctor"
+      aria-label="Valton X Error Doctor"
       aria-live="polite"
       className="my-2 flex max-h-full flex-col gap-3 overflow-y-auto rounded-xl border border-rose-500/30 bg-slate-900 p-4 font-sans shadow-2xl"
     >
@@ -71,7 +71,7 @@ export const FriendlyErrorPanel: FC<
 
           <div className="min-w-0">
             <p className="mb-1 text-[10px] font-semibold uppercase tracking-widest text-rose-300/70">
-              VLNTOX Error Doctor
+              Valton X Error Doctor
             </p>
 
             <h3 className="text-sm font-bold tracking-wide text-rose-400">

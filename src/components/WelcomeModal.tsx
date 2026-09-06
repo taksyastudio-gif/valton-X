@@ -6,7 +6,7 @@ interface WelcomeModalProps {
   onClose: () => void;
 }
 
-const WELCOME_DISMISSED_KEY = 'forgebytex-welcome-dismissed';
+const WELCOME_DISMISSED_KEY = 'valton-x-welcome-dismissed';
 
 const dismissWelcome = (): void => {
   window.localStorage.setItem(WELCOME_DISMISSED_KEY, 'true');
@@ -55,20 +55,12 @@ export const WelcomeModal: FC<WelcomeModalProps> = ({ isOpen, onClose }) => {
       <div className="modal-panel w-full max-w-[450px] rounded-xl border p-6 shadow-2xl">
         <div className="mb-4 flex items-start justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-lg bg-indigo-600 shadow-sm">
-              <img
-                alt="VLNTOX"
-                className="h-6 w-6"
-                src="/vlntox-favicon.svg"
-              />
-            </div>
-
             <div>
               <h2
                 className="text-lg font-bold text-primary"
                 id="welcome-modal-title"
               >
-                Welcome to VLNTOX
+                Welcome to Valton X
               </h2>
               <p className="text-xs text-muted">by TAKSYA STUDIO</p>
             </div>
@@ -85,7 +77,7 @@ export const WelcomeModal: FC<WelcomeModalProps> = ({ isOpen, onClose }) => {
         </div>
 
         <p className="mb-6 text-sm leading-relaxed text-secondary">
-           VLNTOX is a free browser-based workspace for writing and running
+           Valton X is a free browser-based workspace for writing and running
           C, C++, Python, HTML, CSS, and JavaScript. Your code runs locally in
           your browser whenever the selected language supports it.
         </p>

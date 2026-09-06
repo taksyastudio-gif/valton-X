@@ -263,7 +263,8 @@ input {
 }
 
 .main-header-row {
-  min-height: 64px;
+  min-height: 56px;
+  padding-inline: clamp(10px, 2vw, 24px);
 }
 
 .app-header.is-compact .main-header-row {
@@ -428,6 +429,18 @@ input {
 }
 
 @media (max-width: 900px) {
+  .main-header-row {
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding-block: 8px;
+  }
+
+  .brand-block {
+    flex: 1 1 auto;
+    min-width: 140px;
+  }
+
   .app-main {
     min-height: 0;
   }
@@ -458,6 +471,11 @@ input {
 }
 
 @media (max-width: 640px) {
+  .main-header-row {
+    gap: 6px;
+    padding-inline: 8px;
+  }
+
   .workspace-topbar,
   .workspace-bottombar {
     padding-inline: 10px;

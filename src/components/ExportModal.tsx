@@ -5,6 +5,8 @@ import {
   Mail,
   X,
 } from 'lucide-react';
+import { Turnstile } from '@marsidev/react-turnstile';
+import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
   useEffect,
   useMemo,
@@ -15,6 +17,10 @@ import {
 } from 'react';
 
 import type { FileItem } from '../types/byteplay';
+import {
+  firebaseAuth,
+  getFirebaseIdToken,
+} from '../lib/firebase';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -34,8 +40,8 @@ interface ExportOptionProps {
   onSelect: () => void;
 }
 
-interface ForgeByteXManifest {
-  format: 'forgebytex-project';
+interface VlntoxManifest {
+  format: 'vlntox-project';
   version: 1;
   createdAt: string;
   entrypoints: {
@@ -128,6 +134,15 @@ export const ExportModal: FC<ExportModalProps> = ({
     useState<ExportFormat>('file');
   const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fallbackAvailable, setFallbackAvailable] = useState(false);
+  const [email, setEmail] = useState('');
+  const [user, setUser] = useState<User | null>(
+    firebaseAuth?.currentUser ?? null,
+  );
+  const [turnstileToken, setTurnstileToken] = useState('');
+
+  const turnstileSiteKey =
+    import.meta.env.VITE_TURNSTILE_SITE_KEY ?? '';
 
   const normalizedFiles = useMemo(
     () =>
@@ -197,6 +212,14 @@ export const ExportModal: FC<ExportModalProps> = ({
     };
   }, [isExporting, isOpen, onClose]);
 
+  useEffect(() => {
+    if (!firebaseAuth) {
+      return undefined;
+    }
+
+    return onAuthStateChanged(firebaseAuth, setUser);
+  }, []);
+
   if (!isOpen) {
     return null;
   }
@@ -255,6 +278,7 @@ export const ExportModal: FC<ExportModalProps> = ({
 
     setIsExporting(true);
     setError(null);
+    setFallbackAvailable(false);
 
     try {
       if (format === 'file') {
@@ -279,15 +303,53 @@ export const ExportModal: FC<ExportModalProps> = ({
           return;
         }
 
-        const subject = encodeURIComponent(
-          `VLNTOX project: ${
-            activeFile?.name ?? 'source code'
-          }`,
-        );
-        const body = encodeURIComponent(projectBundle);
+        if (!user) {
+          setError('Sign in before sending an email export.');
+          return;
+        }
 
-        window.location.href =
-          `mailto:?subject=${subject}&body=${body}`;
+        if (!turnstileSiteKey || !turnstileToken) {
+          setError('Complete the security check before sending.');
+          return;
+        }
+
+        const idToken = await getFirebaseIdToken();
+
+        if (!idToken) {
+          setError('Your sign-in session expired. Please sign in again.');
+          return;
+        }
+
+        const subject = `Valton X export: ${activeFile?.name ?? 'source code'}`;
+        const payload = {
+          email,
+          filename: activeFile?.name ?? 'source.txt',
+          content: projectBundle,
+          subject,
+        };
+
+        const response = await fetch('/api/export-email', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            ...payload,
+            turnstileToken,
+          }),
+        });
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          if (data?.fallbackAllowed) {
+            setFallbackAvailable(true);
+            setError(data.error || 'Email delivery is unavailable.');
+            return;
+          }
+
+          throw new Error(data?.error || 'Failed to send email.');
+        }
 
         onClose();
         return;
@@ -300,40 +362,7 @@ export const ExportModal: FC<ExportModalProps> = ({
         return;
       }
 
-      const manifest: ForgeByteXManifest = {
-        format: 'forgebytex-project',
-        version: 1,
-        createdAt: new Date().toISOString(),
-        entrypoints: webEntryPoint
-          ? { web: webEntryPoint }
-          : {},
-        files: normalizedFiles.map((file) => ({
-          path: file.name,
-          language: file.language,
-          isWebProjectFile:
-            file.isWebProjectFile === true ||
-            file.language === 'html' ||
-            file.language === 'css' ||
-            file.language === 'javascript',
-        })),
-      };
-
-      const archive = createZipArchive([
-        {
-          path: 'forgebytex.json',
-          content: JSON.stringify(manifest, null, 2),
-        },
-        ...normalizedFiles.map((file) => ({
-          path: file.name,
-          content: file.content,
-        })),
-      ]);
-
-      downloadBlob(
-        'forgebytex-project.zip',
-        toBlobArrayBuffer(archive),
-        'application/zip',
-      );
+      downloadProjectZip();
 
       onClose();
     } catch (exportError: unknown) {
@@ -361,7 +390,56 @@ export const ExportModal: FC<ExportModalProps> = ({
   const isExportDisabled =
     isExporting ||
     (format === 'file' && !activeFile) ||
-    (format !== 'file' && normalizedFiles.length === 0);
+    (format === 'email' &&
+      (!user ||
+        !turnstileSiteKey ||
+        !turnstileToken ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) ||
+    (format !== 'file' && format !== 'email' && normalizedFiles.length === 0);
+
+  const downloadProjectZip = (): void => {
+    const manifest: VlntoxManifest = {
+      format: 'vlntox-project',
+      version: 1,
+      createdAt: new Date().toISOString(),
+      entrypoints: webEntryPoint ? { web: webEntryPoint } : {},
+      files: normalizedFiles.map((file) => ({
+        path: file.name,
+        language: file.language,
+        isWebProjectFile:
+          file.isWebProjectFile === true ||
+          file.language === 'html' ||
+          file.language === 'css' ||
+          file.language === 'javascript',
+      })),
+    };
+    const archive = createZipArchive([
+      {
+        path: 'vlntox.json',
+        content: JSON.stringify(manifest, null, 2),
+      },
+      ...normalizedFiles.map((file) => ({
+        path: file.name,
+        content: file.content,
+      })),
+    ]);
+
+    downloadBlob(
+      'vlntox-project.zip',
+      toBlobArrayBuffer(archive),
+      'application/zip',
+    );
+  };
+
+  const openMailFallback = (): void => {
+    const subject = encodeURIComponent(
+      `Valton X project export: ${activeFile?.name ?? 'source code'}`,
+    );
+    const body = encodeURIComponent(
+      'I downloaded the Valton X project ZIP and attached it to this email.',
+    );
+    window.location.href = `mailto:${encodeURIComponent(email)}?subject=${subject}&body=${body}`;
+  };
 
   return (
     <div
@@ -380,7 +458,7 @@ export const ExportModal: FC<ExportModalProps> = ({
               className="text-lg font-bold text-primary"
               id="export-modal-title"
             >
-               Export VLNTOX Project
+               Export Valton X Project
             </h2>
 
             <p className="mt-1 text-xs text-secondary">
@@ -422,7 +500,7 @@ export const ExportModal: FC<ExportModalProps> = ({
             checked={format === 'project'}
             description={`Download ${normalizedFiles.length} project file${
               normalizedFiles.length === 1 ? '' : 's'
-            } as a ZIP archive with a VLNTOX manifest.`}
+            } as a ZIP archive with a Valton X manifest.`}
             disabled={normalizedFiles.length === 0}
             icon={<FileArchive size={15} />}
             onSelect={() => setFormat('project')}
@@ -431,7 +509,7 @@ export const ExportModal: FC<ExportModalProps> = ({
 
           <ExportOption
             checked={format === 'email'}
-            description="Open your configured email client with the project source in the message body."
+            description="Send the project source to a recipient email via the Valton X export service."
             disabled={normalizedFiles.length === 0}
             icon={<Mail size={15} />}
             onSelect={() => setFormat('email')}
@@ -444,6 +522,68 @@ export const ExportModal: FC<ExportModalProps> = ({
             Archive size: {formatBytes(projectSize)}. Maximum
             project size: 10 MB.
           </p>
+        ) : null}
+
+        {fallbackAvailable ? (
+          <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+            <p className="text-xs text-amber-200">
+              Email delivery is unavailable or today&apos;s export was already
+              used. Download the ZIP and attach it manually.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                className="secondary-action rounded px-3 py-2 text-xs font-semibold"
+                onClick={downloadProjectZip}
+                type="button"
+              >
+                Download ZIP
+              </button>
+              <button
+                className="secondary-action rounded px-3 py-2 text-xs font-semibold"
+                onClick={openMailFallback}
+                type="button"
+              >
+                Open mail app
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {format === 'email' ? (
+          <div className="mt-3">
+            <p className="mb-2 text-[11px] text-secondary">
+              {user
+                ? 'Your account is required to protect the export service.'
+                : 'Sign in from the header before sending an email export.'}
+            </p>
+            <label className="block text-xs font-semibold text-secondary mb-1">
+              Recipient email
+            </label>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+              className="input-field w-full rounded-lg border px-3 py-2 text-xs outline-none"
+            />
+            {turnstileSiteKey ? (
+              <div className="mt-3">
+                <Turnstile
+                  onError={() => {
+                    setTurnstileToken('');
+                    setError('Security check failed. Please try again.');
+                  }}
+                  onExpire={() => setTurnstileToken('')}
+                  onSuccess={setTurnstileToken}
+                  siteKey={turnstileSiteKey}
+                />
+              </div>
+            ) : (
+              <p className="mt-2 text-[11px] text-amber-300">
+                Turnstile is not configured for this environment.
+              </p>
+            )}
+          </div>
         ) : null}
 
         {error ? (
@@ -501,7 +641,7 @@ const getActionLabel = (
     case 'project':
       return 'Download ZIP';
     case 'email':
-      return 'Open email client';
+      return 'Send via email';
   }
 };
 
@@ -528,10 +668,10 @@ const normalizeDownloadName = (value: string): string => {
   const normalized = normalizeArchivePath(value);
   const parts = normalized.split('/');
 
-  return (
-    parts[parts.length - 1] ||
-    'forgebytex-file.txt'
-  );
+    return (
+      parts[parts.length - 1] ||
+      'vlntox-file.txt'
+    );
 };
 
 const getMimeType = (filename: string): string => {

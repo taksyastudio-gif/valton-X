@@ -83,7 +83,7 @@ export class ExecutionClient {
         case 'javascript':
           result = {
             success: true,
-            output: `[VLNTOX] ${request.fileName} is ready in the Live Preview panel.`,
+            output: `[Valton X] ${request.fileName} is ready in the Live Preview panel.`,
             exitCode: 0,
             status: 'completed',
             phase: 'run',

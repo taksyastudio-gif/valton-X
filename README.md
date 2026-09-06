@@ -1,4 +1,4 @@
-# ForgebyteX
+# Valton X
 
 A browser-based C and HTML learning app with a real backend compiler path for deployment.
 
@@ -23,6 +23,31 @@ Copy and run [`supabase/feedback.sql`](supabase/feedback.sql) in the Supabase SQ
 editor, then set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` in the frontend
 environment. The policy permits feedback submissions but does not expose
 feedback rows for public reads.
+
+### Email export
+
+The Export dialog can send the current project source to a recipient through
+the Vercel serverless function at `/api/export-email`. Configure these
+variables in the Vercel project settings:
+
+```env
+FIREBASE_PROJECT_ID=valton-x
+FIREBASE_CLIENT_EMAIL=your-firebase-admin-client-email
+FIREBASE_PRIVATE_KEY=your-firebase-admin-private-key
+TURNSTILE_SECRET_KEY=your-turnstile-secret-key
+VITE_SUPABASE_URL=your-supabase-project-url
+SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
+BREVO_API_KEY=your-brevo-api-key
+BREVO_SENDER_EMAIL=your-verified-sender@example.com
+BREVO_SENDER_NAME=Valton X
+```
+
+The sender address must be verified in Brevo. The Brevo API key remains
+server-side and must not use a `VITE_` prefix. Run
+[`supabase/email_export_usage.sql`](supabase/email_export_usage.sql) in the
+Supabase SQL editor before enabling email export. Each Firebase account gets
+one successful email export per UTC day. If delivery is unavailable, the
+client offers a ZIP download and a `mailto:` fallback.
 
 ## Render deployment
 

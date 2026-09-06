@@ -28,7 +28,7 @@ interface FileExplorerProps {
   files: ProjectFile[];
   activeFileId: string;
   onSelectFile: (id: string) => void;
-  onAddFile: () => void;
+  onAddFile: (name?: string) => void;
   onRenameFile: (id: string, newName: string) => void;
   onDeleteFile: (id: string) => void;
 }
@@ -43,6 +43,8 @@ export const FileExplorer: FC<FileExplorerProps> = ({
 }) => {
   const [editingFileId, setEditingFileId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
+  const [isAddingFile, setIsAddingFile] = useState(false);
+  const [newFileName, setNewFileName] = useState('');
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -55,6 +57,22 @@ export const FileExplorer: FC<FileExplorerProps> = ({
   const cancelEditing = (): void => {
     setEditingFileId(null);
     setDraftName('');
+  };
+
+  const cancelAdding = (): void => {
+    setIsAddingFile(false);
+    setNewFileName('');
+  };
+
+  const submitNewFile = (): void => {
+    const nextName = newFileName.trim();
+
+    if (!nextName) {
+      return;
+    }
+
+    onAddFile(nextName);
+    cancelAdding();
   };
 
   const saveName = (fileId: string): void => {
@@ -104,17 +122,60 @@ export const FileExplorer: FC<FileExplorerProps> = ({
           </p>
         </div>
 
-        <button
-          aria-label="Create new file"
-          className="primary-action flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold"
-          onClick={onAddFile}
-          title="Create new file"
-          type="button"
-        >
-          <Plus aria-hidden="true" size={13} />
-          New
-        </button>
+        {!isAddingFile ? (
+          <button
+            aria-label="Create new file"
+            className="primary-action flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold"
+            onClick={() => setIsAddingFile(true)}
+            title="Create new file"
+            type="button"
+          >
+            <Plus aria-hidden="true" size={13} />
+            New
+          </button>
+        ) : null}
       </div>
+
+      {isAddingFile ? (
+        <form
+          className="border-b border-theme p-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submitNewFile();
+          }}
+        >
+          <input
+            aria-label="New file name"
+            autoFocus
+            className="input-field w-full rounded border px-2 py-1.5 text-xs outline-none"
+            onChange={(event) => setNewFileName(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                cancelAdding();
+              }
+            }}
+            placeholder="main.c or script.py"
+            type="text"
+            value={newFileName}
+          />
+          <div className="mt-2 flex gap-2">
+            <button
+              className="primary-action rounded px-2 py-1 text-xs font-semibold"
+              type="submit"
+            >
+              Add
+            </button>
+            <button
+              className="secondary-action rounded border px-2 py-1 text-xs"
+              onClick={cancelAdding}
+              type="button"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : null}
 
       <div
         aria-label="Project files"

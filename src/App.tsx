@@ -11,6 +11,11 @@ import {
   Separator as PanelResizeHandle,
 } from 'react-resizable-panels';
 import type * as monaco from 'monaco-editor';
+import {
+  Files,
+  PanelLeftClose,
+  PanelLeftOpen,
+} from 'lucide-react';
 
 import { CodeEditor } from './components/CodeEditor';
 import { ConsolePreviewPanel } from './components/ConsolePreviewPanel';
@@ -18,10 +23,10 @@ import {
   FileExplorer,
   type ProjectFile,
 } from './components/FileExplorer';
-import { FeedbackModal } from './components/FeedbackModal';
 import { HeaderControls } from './components/HeaderControls';
-import { NebCurriculumModal } from './components/NebCurriculumModal';
 import { ExportModal } from './components/ExportModal';
+import { FeedbackModal } from './components/FeedbackModal';
+
 import {
   WelcomeModal,
   shouldShowWelcome,
@@ -32,11 +37,6 @@ import type {
   ExecutionStatus,
   SupportedLanguage as RuntimeLanguage,
 } from './compiler/execution-protocol';
-
-import {
-  nebPrograms,
-  type NebProgram,
-} from './data/nebGrade12Curriculum';
 
 import {
   clearMonacoMarkers,
@@ -71,7 +71,7 @@ const INITIAL_FILES: ForgeProjectFile[] = [
     content: `#include <stdio.h>
 
 int main(void) {
-    printf("Hello VLNTOX from C!\\n");
+    printf("Hello from Valton X C!\\n");
     return 0;
 }
 `,
@@ -83,7 +83,7 @@ int main(void) {
     content: `#include <iostream>
 
 int main() {
-    std::cout << "Hello VLNTOX from C++!" << std::endl;
+    std::cout << "Hello from Valton X C++!" << std::endl;
     return 0;
 }
 `,
@@ -92,7 +92,7 @@ int main() {
     id: 'main-py',
     name: 'main.py',
     language: 'python',
-    content: `print("Hello VLNTOX from Python!")
+    content: `print("Hello from Valton X Python!")
 
 for index in range(5):
     print(index)
@@ -108,12 +108,12 @@ for index in range(5):
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-   <title>VLNTOX — Browser Coding Workspace</title>
+   <title>Valton X — Browser Coding Workspace</title>
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
   <main class="card">
-    <h1>Hello VLNTOX!</h1>
+    <h1>Hello from Valton X!</h1>
     <p>Edit index.html, style.css, and script.js together.</p>
     <button id="demo-button" type="button">Click me</button>
     <p id="message"></p>
@@ -180,11 +180,13 @@ button?.addEventListener('click', () => {
 ];
 
 const INITIAL_TERMINAL_LOGS = [
-  'VLNTOX ready. Open a file and click Run Code.',
+  'Valton X ready. Open a file and click Run Code.',
   'Tip: C and Python input is typed directly into this terminal.',
 ];
 
 const THEME_STORAGE_KEY = 'forgebytex-theme';
+const FILES_STORAGE_KEY = 'valton-x-files';
+const ACTIVE_FILE_STORAGE_KEY = 'valton-x-active-file';
 
 const createFileId = (): string =>
   `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -207,6 +209,88 @@ const getInitialTheme = (): EditorTheme => {
 
   return isEditorTheme(savedTheme) ? savedTheme : 'black';
 };
+
+const isStoredProjectFile = (
+  value: unknown,
+): value is ForgeProjectFile => {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const file = value as Partial<ForgeProjectFile>;
+
+  return (
+    typeof file.id === 'string' &&
+    typeof file.name === 'string' &&
+    typeof file.language === 'string' &&
+    typeof file.content === 'string'
+  );
+};
+
+const getInitialFiles = (): ForgeProjectFile[] => {
+  if (typeof window === 'undefined') {
+    return INITIAL_FILES;
+  }
+
+  try {
+    const storedFiles = window.localStorage.getItem(
+      FILES_STORAGE_KEY,
+    );
+
+    if (!storedFiles) {
+      return INITIAL_FILES;
+    }
+
+    const parsedFiles: unknown = JSON.parse(storedFiles);
+
+    if (
+      Array.isArray(parsedFiles) &&
+      parsedFiles.length > 0 &&
+      parsedFiles.every(isStoredProjectFile)
+    ) {
+      return parsedFiles;
+    }
+  } catch {
+    // Invalid saved workspace data falls back to the starter files.
+  }
+
+  return INITIAL_FILES;
+};
+
+const getInitialActiveFileId = (
+  initialFiles: ForgeProjectFile[],
+): string => {
+  if (typeof window !== 'undefined') {
+    const storedActiveFileId = window.localStorage.getItem(
+      ACTIVE_FILE_STORAGE_KEY,
+    );
+
+    if (
+      storedActiveFileId &&
+      initialFiles.some(
+        (file) => file.id === storedActiveFileId,
+      )
+    ) {
+      return storedActiveFileId;
+    }
+  }
+
+  return initialFiles[0]?.id ?? '';
+};
+
+const getInitialWorkspace = (): {
+  files: ForgeProjectFile[];
+  activeFileId: string;
+} => {
+  const files = getInitialFiles();
+
+  return {
+    files,
+    activeFileId: getInitialActiveFileId(files),
+  };
+};
+
+const INITIAL_WORKSPACE = getInitialWorkspace();
 
 const getExtensionForLanguage = (
   language: SupportedLanguage,
@@ -237,15 +321,11 @@ const toRuntimeLanguage = (
 
 export const App = (): ReactElement => {
   const [files, setFiles] =
-    useState<ForgeProjectFile[]>(INITIAL_FILES);
+    useState<ForgeProjectFile[]>(INITIAL_WORKSPACE.files);
   const [activeFileId, setActiveFileId] =
-    useState(INITIAL_FILES[0].id);
+    useState(INITIAL_WORKSPACE.activeFileId);
 
-  const [activeLanguage, setActiveLanguage] =
-    useState<SupportedLanguage>(INITIAL_FILES[0].language);
-
-  const [activeTheme, setActiveTheme] =
-    useState<EditorTheme>(getInitialTheme);
+  const [activeTheme] = useState<EditorTheme>(getInitialTheme);
 
   const [terminalPosition, setTerminalPosition] =
     useState<TerminalPosition>('bottom');
@@ -265,14 +345,19 @@ export const App = (): ReactElement => {
     string | null
   >(null);
 
-  const [isFocusMode, setIsFocusMode] = useState(false);
-  const [isFeedbackOpen, setIsFeedbackOpen] = useState(false);
+  const [isFocusMode] = useState(false);
   const [isWelcomeOpen, setIsWelcomeOpen] =
     useState(shouldShowWelcome);
-  const [isCurriculumOpen, setIsCurriculumOpen] =
+  const [isFeedbackOpen, setIsFeedbackOpen] =
     useState(false);
-  const [isExportOpen, setIsExportOpen] = useState(false);
-
+  const [isExportOpen, setIsExportOpen] =
+    useState(false);
+  const [isExplorerOpen, setIsExplorerOpen] =
+    useState(true);
+  const [programInputs, setProgramInputs] = useState<
+    Array<{ id: string; value: string }>
+  >([]);
+  
   const executionClientRef =
     useRef<ExecutionClient | null>(null);
 
@@ -317,6 +402,17 @@ export const App = (): ReactElement => {
     );
   }, [activeTheme]);
 
+  useEffect(() => {
+    window.localStorage.setItem(
+      FILES_STORAGE_KEY,
+      JSON.stringify(files),
+    );
+    window.localStorage.setItem(
+      ACTIVE_FILE_STORAGE_KEY,
+      activeFileId,
+    );
+  }, [activeFileId, files]);
+
   const clearDiagnostics = useCallback((): void => {
     if (monacoRef.current && editorRef.current) {
       clearMonacoMarkers(
@@ -351,9 +447,10 @@ export const App = (): ReactElement => {
       }
 
       setActiveFileId(fileId);
-      setActiveLanguage(selectedFile.language);
       setHtmlPreviewDoc(null);
       setErrorOutput('');
+      // Clear prepared inputs when switching files to prevent stale stdin.
+      setProgramInputs([]);
       clearDiagnostics();
     },
     [clearDiagnostics, files],
@@ -379,17 +476,23 @@ export const App = (): ReactElement => {
     [activeFile, activeFileId, clearDiagnostics],
   );
 
-  const handleAddFile = useCallback((): void => {
-    const language: SupportedLanguage = 'javascript';
+  const handleAddFile = useCallback(
+    (requestedName = ''): void => {
+    const trimmedName = requestedName.trim();
+    const fileName =
+      trimmedName || `script-${files.length + 1}.js`;
+    const language = getLanguageFromFilename(fileName);
     const extension = getExtensionForLanguage(language);
-    const fileName = `script-${files.length + 1}.${extension}`;
+    const normalizedFileName = trimmedName
+      ? fileName
+      : `script-${files.length + 1}.${extension}`;
 
     const newFile: ForgeProjectFile = {
       id: createFileId(),
-      name: fileName,
+      name: normalizedFileName,
       language,
-      isWebProjectFile: true,
-      content: '// New VLNTOX file\n',
+      isWebProjectFile: isWebProjectFile({ language }),
+      content: '',
     };
 
     setFiles((currentFiles) => [
@@ -397,11 +500,12 @@ export const App = (): ReactElement => {
       newFile,
     ]);
     setActiveFileId(newFile.id);
-    setActiveLanguage(newFile.language);
     setHtmlPreviewDoc(null);
     setErrorOutput('');
     clearDiagnostics();
-  }, [clearDiagnostics, files.length]);
+    },
+    [clearDiagnostics, files.length],
+  );
 
   const handleRenameFile = useCallback(
     (fileId: string, newName: string): void => {
@@ -451,7 +555,6 @@ export const App = (): ReactElement => {
         const nextFile = remainingFiles[0];
 
         setActiveFileId(nextFile.id);
-        setActiveLanguage(nextFile.language);
       }
 
       setHtmlPreviewDoc(null);
@@ -465,38 +568,6 @@ export const App = (): ReactElement => {
     ],
   );
 
-  const handleLanguageSelect = useCallback(
-    (language: SupportedLanguage): void => {
-      setActiveLanguage(language);
-      setErrorOutput('');
-
-      const matchingFile = files.find(
-        (file) => file.language === language,
-      );
-
-      if (matchingFile) {
-        setActiveFileId(matchingFile.id);
-        return;
-      }
-
-      const extension = getExtensionForLanguage(language);
-      const newFile: ForgeProjectFile = {
-        id: createFileId(),
-        name: `untitled-${files.length + 1}.${extension}`,
-        language,
-        isWebProjectFile: isWebProjectFile({ language }),
-        content: '',
-      };
-
-      setFiles((currentFiles) => [
-        ...currentFiles,
-        newFile,
-      ]);
-      setActiveFileId(newFile.id);
-    },
-    [files],
-  );
-
   const handleSendInput = useCallback(
     (input: string): void => {
       const sent =
@@ -505,7 +576,7 @@ export const App = (): ReactElement => {
 
       if (!sent) {
         appendTerminalLog(
-          '[VLNTOX] No program is currently waiting for input.',
+          '[Valton X] No program is currently waiting for input.',
         );
       }
     },
@@ -526,7 +597,7 @@ export const App = (): ReactElement => {
       setExecutionStatus('stopped');
       setErrorOutput('');
       appendTerminalLog(
-        '[VLNTOX] Execution stopped by the user.',
+        '[Valton X] Execution stopped by the user.',
       );
       return;
     }
@@ -565,6 +636,22 @@ export const App = (): ReactElement => {
       `> Starting ${activeFile.name}...`,
     );
 
+    // Build the upfront stdin string from the prepared input items.
+    // This is NOT live interactive stdin – inputs are prepared before Run is pressed.
+    const stdinString = programInputs
+      .map((item) => item.value)
+      .join('\n');
+
+    if (
+      (activeFile.language === 'c' ||
+        activeFile.language === 'cpp') &&
+      programInputs.length > 0
+    ) {
+      appendTerminalLog(
+        `[Valton X] Running with ${programInputs.length} prepared stdin line${programInputs.length === 1 ? '' : 's'}.`,
+      );
+    }
+
     try {
       const result = await executionClient.execute(
         {
@@ -573,6 +660,7 @@ export const App = (): ReactElement => {
           language: toRuntimeLanguage(
             activeFile.language,
           ),
+          stdin: stdinString,
         },
         {
           onOutput: (_stream, text, attempt) => {
@@ -640,6 +728,7 @@ export const App = (): ReactElement => {
     clearDiagnostics,
     files,
     isRunning,
+    programInputs,
   ]);
 
   const handleClearTerminal = useCallback((): void => {
@@ -656,86 +745,16 @@ export const App = (): ReactElement => {
 
     setFiles(INITIAL_FILES);
     setActiveFileId(INITIAL_FILES[0].id);
-    setActiveLanguage(INITIAL_FILES[0].language);
     setTerminalLogs(INITIAL_TERMINAL_LOGS);
     setClearGeneration((generation) => generation + 1);
     setHtmlPreviewDoc(null);
     setErrorOutput('');
     setExecutionStatus('idle');
     setIsRunning(false);
+    setProgramInputs([]);
 
     clearDiagnostics();
   }, [clearDiagnostics]);
-
-  const handleBuggySample = useCallback((): void => {
-    if (!activeFile) {
-      return;
-    }
-
-    const buggyContent =
-      activeFile.language === 'html'
-        ? `<div>
-   <h1>Broken VLNTOX sample</h1>
-  <p>This HTML is intentionally incomplete.
-</div>`
-        : activeFile.language === 'python'
-          ? `print("This sample has a syntax error"
-`
-          : `#include <stdio.h>
-
-int main(void) {
-    printf("Missing semicolon")
-    return 0;
-}
-`;
-
-    setFiles((currentFiles) =>
-      currentFiles.map((file) =>
-        file.id === activeFile.id
-          ? { ...file, content: buggyContent }
-          : file,
-      ),
-    );
-
-    clearDiagnostics();
-    setErrorOutput('');
-    setHtmlPreviewDoc(null);
-
-    appendTerminalLog(
-      `Loaded an intentional ${activeFile.language.toUpperCase()} sample error.`,
-    );
-  }, [activeFile, appendTerminalLog, clearDiagnostics]);
-
-  const handleLoadProgram = useCallback(
-    (program: NebProgram): void => {
-      const extension =
-        program.language === 'html'
-          ? 'html'
-          : getExtensionForLanguage(program.language);
-
-      const loadedFile: ForgeProjectFile = {
-        id: createFileId(),
-        name: `${program.id}.${extension}`,
-        language: program.language,
-        content: program.content,
-        isWebProjectFile: isWebProjectFile({
-          language: program.language,
-        }),
-      };
-
-      setFiles((currentFiles) => [
-        ...currentFiles,
-        loadedFile,
-      ]);
-      setActiveFileId(loadedFile.id);
-      setActiveLanguage(loadedFile.language);
-      setIsCurriculumOpen(false);
-      setHtmlPreviewDoc(null);
-      setErrorOutput('');
-      clearDiagnostics();
-    },
-    [clearDiagnostics],
-  );
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -784,54 +803,50 @@ int main(void) {
     </div>
   );
 
-  const renderConsole = (): ReactElement => (
-    <ConsolePreviewPanel
-      activeLanguage={
-        activeFile?.language ?? activeLanguage
-      }
-      activeTheme={activeTheme}
-      clearGeneration={clearGeneration}
-      errorFileName={activeFile?.name}
-      errorOutput={errorOutput}
-      executionStatus={executionStatus}
-      files={files}
-      htmlPreviewDoc={htmlPreviewDoc}
-      isWaitingForInput={
-        executionStatus === 'waiting-input'
-      }
-      onClearError={() => setErrorOutput('')}
-      onClearTerminal={handleClearTerminal}
-      onJumpToError={(line, column) => {
-        goToLineColumn(editorRef.current, line, column);
-      }}
-      onSendInput={handleSendInput}
-      onTerminalPositionChange={setTerminalPosition}
-      terminalLogs={terminalLogs}
-      terminalPosition={terminalPosition}
-    />
-  );
+  const renderConsole = (): ReactElement => {
+    const lang = activeFile?.language ?? 'plaintext';
+    
+
+    return (
+      <div className="flex h-full min-w-0 flex-col overflow-hidden">
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <ConsolePreviewPanel
+            activeLanguage={lang}
+            activeTheme={activeTheme}
+            clearGeneration={clearGeneration}
+            errorFileName={activeFile?.name}
+            errorOutput={errorOutput}
+            executionStatus={executionStatus}
+            files={files}
+            htmlPreviewDoc={htmlPreviewDoc}
+            isWaitingForInput={
+              executionStatus === 'waiting-input'
+            }
+            onClearError={() => setErrorOutput('')}
+            onClearTerminal={handleClearTerminal}
+            onJumpToError={(line, column) => {
+              goToLineColumn(editorRef.current, line, column);
+            }}
+            onSendInput={handleSendInput}
+            onTerminalPositionChange={setTerminalPosition}
+            terminalLogs={terminalLogs}
+            terminalPosition={terminalPosition}
+          />
+        </div>
+
+      </div>
+    );
+  };
 
   return (
     <div className="app-shell flex h-screen w-screen flex-col overflow-hidden font-sans">
       <HeaderControls
-        activeLanguage={
-          activeFile?.language ?? activeLanguage
-        }
-        activeTheme={activeTheme}
-        isFocusMode={isFocusMode}
         isRunning={isRunning}
-        onBuggySample={handleBuggySample}
         onClear={handleClearTerminal}
         onExport={() => setIsExportOpen(true)}
         onFeedbackClick={() => setIsFeedbackOpen(true)}
-        onLanguageSelect={handleLanguageSelect}
-        onNewFile={handleAddFile}
         onReset={handleReset}
         onRun={() => void handleRun()}
-        onThemeSelect={setActiveTheme}
-        onToggleFocusMode={() =>
-          setIsFocusMode((current) => !current)
-        }
       />
 
       <main className="app-main relative min-h-0 flex-1 overflow-hidden">
@@ -851,54 +866,93 @@ int main(void) {
             </Panel>
           </PanelGroup>
         ) : (
-          <PanelGroup
-            className="h-full w-full"
-            orientation="horizontal"
-          >
-            <Panel
-              defaultSize="20"
-              maxSize="35"
-              minSize="15"
+          <div className="flex h-full w-full">
+            <aside
+              aria-label="Workspace activity"
+              className="activity-sidebar flex w-12 shrink-0 flex-col items-center gap-2 border-r border-theme bg-surface py-2"
             >
-              <FileExplorer
-                activeFileId={activeFile?.id ?? ''}
-                files={editorFiles}
-                onAddFile={handleAddFile}
-                onDeleteFile={handleDeleteFile}
-                onRenameFile={handleRenameFile}
-                onSelectFile={handleSelectFile}
-              />
-            </Panel>
-
-            <PanelResizeHandle className="workspace-resizer w-1 cursor-col-resize" />
-
-            <Panel defaultSize="80">
-              <PanelGroup
-                className="h-full w-full"
-                orientation={
-                  terminalPosition === 'right'
-                    ? 'horizontal'
-                    : 'vertical'
+              <button
+                aria-label={
+                  isExplorerOpen
+                    ? 'Collapse file explorer'
+                    : 'Open file explorer'
                 }
+                className="icon-action rounded-md p-2"
+                onClick={() => setIsExplorerOpen((current) => !current)}
+                title={
+                  isExplorerOpen
+                    ? 'Collapse file explorer'
+                    : 'Open file explorer'
+                }
+                type="button"
               >
-                <Panel defaultSize="60" minSize="30">
-                  {renderEditor()}
-                </Panel>
+                {isExplorerOpen ? (
+                  <PanelLeftClose aria-hidden="true" size={16} />
+                ) : (
+                  <PanelLeftOpen aria-hidden="true" size={16} />
+                )}
+              </button>
 
-                <PanelResizeHandle
-                  className={
+              <Files
+                aria-hidden="true"
+                className="mt-auto text-muted"
+                size={15}
+              />
+            </aside>
+
+            <PanelGroup
+              className="h-full min-w-0 flex-1"
+              orientation="horizontal"
+            >
+              {isExplorerOpen ? (
+                <Panel
+                  defaultSize="20"
+                  maxSize="35"
+                  minSize="15"
+                >
+                  <FileExplorer
+                    activeFileId={activeFile?.id ?? ''}
+                    files={editorFiles}
+                    onAddFile={handleAddFile}
+                    onDeleteFile={handleDeleteFile}
+                    onRenameFile={handleRenameFile}
+                    onSelectFile={handleSelectFile}
+                  />
+                </Panel>
+              ) : null}
+
+              {isExplorerOpen ? (
+                <PanelResizeHandle className="workspace-resizer w-1 cursor-col-resize" />
+              ) : null}
+
+              <Panel defaultSize="80">
+                <PanelGroup
+                  className="h-full w-full"
+                  orientation={
                     terminalPosition === 'right'
-                      ? 'workspace-resizer w-1 cursor-col-resize'
-                      : 'workspace-resizer h-1 cursor-row-resize'
+                      ? 'horizontal'
+                      : 'vertical'
                   }
-                />
+                >
+                  <Panel defaultSize="60" minSize="30">
+                    {renderEditor()}
+                  </Panel>
 
-                <Panel defaultSize="40" minSize="20">
-                  {renderConsole()}
-                </Panel>
-              </PanelGroup>
-            </Panel>
-          </PanelGroup>
+                  <PanelResizeHandle
+                    className={
+                      terminalPosition === 'right'
+                        ? 'workspace-resizer w-1 cursor-col-resize'
+                        : 'workspace-resizer h-1 cursor-row-resize'
+                    }
+                  />
+
+                  <Panel defaultSize="40" minSize="20">
+                    {renderConsole()}
+                  </Panel>
+                </PanelGroup>
+              </Panel>
+            </PanelGroup>
+          </div>
         )}
       </main>
 
@@ -907,17 +961,8 @@ int main(void) {
         onClose={() => setIsWelcomeOpen(false)}
       />
 
-      <NebCurriculumModal
-        isOpen={isCurriculumOpen}
-        onClose={() => setIsCurriculumOpen(false)}
-        onLoadProgram={handleLoadProgram}
-        programs={nebPrograms}
-      />
-
       <FeedbackModal
-        currentLanguage={
-          activeFile?.language ?? activeLanguage
-        }
+        currentLanguage={activeFile?.language ?? 'plaintext'}
         currentTheme={activeTheme}
         isOpen={isFeedbackOpen}
         onClose={() => setIsFeedbackOpen(false)}

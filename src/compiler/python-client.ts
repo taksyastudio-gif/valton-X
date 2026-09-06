@@ -10,6 +10,8 @@ interface PendingExecution {
   callbacks?: ExecutionCallbacks;
 }
 
+const EXECUTION_TIMEOUT_MS = 30000;
+
 /**
  * Owns the dedicated Pyodide Web Worker.
  *
@@ -96,9 +98,38 @@ export class PythonClient {
     const requestId = this.createRequestId();
 
     return new Promise<ExecutionResult>((resolve) => {
+      const timeoutId = setTimeout(() => {
+        if (
+          this.activeRequestId !== requestId ||
+          !this.pendingExecution
+        ) {
+          return;
+        }
+
+        const pendingExecution = this.pendingExecution;
+        this.pendingExecution = null;
+        this.activeRequestId = null;
+        this.worker?.terminate();
+        this.worker = null;
+        this.initializeWorker();
+
+        pendingExecution.callbacks?.onStatus?.('timeout');
+        pendingExecution.resolve({
+          success: false,
+          output: '',
+          error: `Execution timed out after ${EXECUTION_TIMEOUT_MS / 1000} seconds.`,
+          exitCode: null,
+          status: 'timeout',
+          phase: 'run',
+        });
+      }, EXECUTION_TIMEOUT_MS);
+
       this.activeRequestId = requestId;
       this.pendingExecution = {
-        resolve,
+        resolve: (result) => {
+          clearTimeout(timeoutId);
+          resolve(result);
+        },
         callbacks,
       };
 
@@ -158,7 +189,7 @@ export class PythonClient {
 
     pendingExecution.resolve({
       success: false,
-      output: '[VLNTOX] Execution stopped.',
+      output: '[Valton X] Execution stopped.',
       error: 'Execution stopped by the user.',
       exitCode: null,
       status: 'stopped',
