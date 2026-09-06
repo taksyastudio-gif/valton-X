@@ -35,7 +35,21 @@ const getAuthErrorMessage = (error: unknown): string => {
     return 'This website is not authorized in Firebase Authentication.';
   }
 
-  return 'Authentication could not be completed. Please try again.';
+  if (code === 'auth/operation-not-allowed') {
+    return 'Google sign-in is not enabled in Firebase Authentication.';
+  }
+
+  if (code === 'auth/invalid-api-key') {
+    return 'Firebase rejected the API key. Check the Vercel production value.';
+  }
+
+  if (code === 'auth/configuration-not-found') {
+    return 'Firebase Auth configuration is missing or invalid.';
+  }
+
+  return code
+    ? `Authentication failed (${code}). Check the Firebase and Vercel configuration.`
+    : 'Authentication could not be completed. Please try again.';
 };
 
 export const FirebaseAuthButton: FC = () => {
