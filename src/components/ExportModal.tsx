@@ -341,14 +341,32 @@ export const ExportModal: FC<ExportModalProps> = ({
         });
 
         if (!response.ok) {
-          const data = await response.json().catch(() => ({}));
+          const responseText = await response.text();
+          let data: { error?: unknown; fallbackAllowed?: unknown } = {};
+
+          try {
+            data = JSON.parse(responseText) as typeof data;
+          } catch {
+            // Vercel may return an HTML/text error page for a failed function.
+          }
+
           if (data?.fallbackAllowed) {
             setFallbackAvailable(true);
-            setError(data.error || 'Email delivery is unavailable.');
+            setError(
+              typeof data.error === 'string'
+                ? data.error
+                : `Email delivery failed (HTTP ${response.status}).`,
+            );
             return;
           }
 
-          throw new Error(data?.error || 'Failed to send email.');
+          const serverError =
+            typeof data.error === 'string' ? data.error : responseText.trim();
+
+          throw new Error(
+            serverError ||
+              `Email export failed with HTTP ${response.status}.`,
+          );
         }
 
         onClose();
