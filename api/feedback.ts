@@ -70,7 +70,7 @@ export default async function handler(req, res) {
         language,
         app_version: appVersion,
       }),
-    }),
+    });
 
     if (!response.ok) {
       const details = await response.text();

@@ -18,6 +18,7 @@ export default async function handler(req, res) {
       TURNSTILE_SECRET_KEY: process.env.TURNSTILE_SECRET_KEY,
       BREVO_API_KEY: process.env.BREVO_API_KEY,
       BREVO_SENDER_EMAIL: process.env.BREVO_SENDER_EMAIL,
+      BREVO_SENDER_NAME: process.env.BREVO_SENDER_NAME,
     };
 
     for (const [name, value] of Object.entries(requiredEnv)) {
