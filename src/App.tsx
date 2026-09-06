@@ -820,7 +820,9 @@ export const App = (): ReactElement => {
             files={files}
             htmlPreviewDoc={htmlPreviewDoc}
             isWaitingForInput={
-              executionStatus === 'waiting-input'
+              executionStatus === 'waiting-input' ||
+              (isRunning &&
+                (lang === 'c' || lang === 'cpp'))
             }
             onClearError={() => setErrorOutput('')}
             onClearTerminal={handleClearTerminal}

@@ -12,7 +12,8 @@ export type { ExecutionResult } from './execution-protocol';
 interface CWorkerRequest {
   code: string;
   language: 'c' | 'cpp';
-  /** Upfront/prepared stdin (newline-separated lines). NOT live interactive stdin. */
+  /** Shared terminal stdin buffer used by the WASI worker. */
+  stdinBuffer: SharedArrayBuffer;
   stdin: string;
 }
 
@@ -34,12 +35,13 @@ const EXECUTION_TIMEOUT_MS = 30000;
  * The worker uses browsercc (Clang/LLD compiled to WASM) to compile the source
  * into a WASI binary, then runs it with @bjorn3/browser_wasi_shim.
  *
- * stdin is passed upfront before execution – true interactive stdin is not
- * available via the browser WASM path.
+ * stdin is exchanged through a shared buffer so the WASI worker can block
+ * while the terminal waits for the next line.
  */
 export class CompilerClient {
   /** Currently active worker (null when idle). */
   private worker: Worker | null = null;
+  private stdinBuffer: SharedArrayBuffer | null = null;
   private activeRequest = false;
 
   public async compileAndRun(
@@ -141,9 +143,12 @@ export class CompilerClient {
       };
 
       try {
+        const stdinBuffer = this.createStdinBuffer(stdin);
+        this.stdinBuffer = stdinBuffer;
         const request: CWorkerRequest = {
           code,
           language: (language === 'cpp' ? 'cpp' : 'c') as 'c' | 'cpp',
+          stdinBuffer,
           stdin,
         };
 
@@ -175,12 +180,38 @@ export class CompilerClient {
     });
   }
 
-  /** stdin is upfront – live input is not available via the browser C runtime. */
-  public sendInput(_input: string): void {
-    // No-op: C/C++ stdin is provided before execution, not during.
+  /** Sends one terminal line to the blocked C/C++ WASI stdin reader. */
+  public sendInput(input: string): void {
+    if (!this.stdinBuffer) {
+      return;
+    }
+
+    const control = new Int32Array(this.stdinBuffer, 0, 4);
+    const data = new Uint8Array(this.stdinBuffer, 16);
+    const bytes = new TextEncoder().encode(
+      input.endsWith('\n') ? input : `${input}\n`,
+    );
+    const writePosition = Atomics.load(control, 0);
+
+    if (writePosition + bytes.length > data.length) {
+      return;
+    }
+
+    data.set(bytes, writePosition);
+    Atomics.store(control, 0, writePosition + bytes.length);
+    Atomics.add(control, 3, 1);
+    Atomics.notify(control, 3);
   }
 
   public stopCurrent(): void {
+    if (this.stdinBuffer) {
+      const control = new Int32Array(this.stdinBuffer, 0, 4);
+      Atomics.store(control, 2, 1);
+      Atomics.add(control, 3, 1);
+      Atomics.notify(control, 3);
+      this.stdinBuffer = null;
+    }
+
     this.worker?.terminate();
     this.worker = null;
     this.activeRequest = false;
@@ -188,6 +219,27 @@ export class CompilerClient {
 
   public terminate(): void {
     this.stopCurrent();
+  }
+
+  private createStdinBuffer(initialInput: string): SharedArrayBuffer {
+    const buffer = new SharedArrayBuffer(16 + 65536);
+    const control = new Int32Array(buffer, 0, 4);
+    const data = new Uint8Array(buffer, 16);
+    const initialBytes = new TextEncoder().encode(
+      initialInput
+        ? initialInput.endsWith('\n')
+          ? initialInput
+          : `${initialInput}\n`
+        : '',
+    );
+
+    if (initialBytes.length > data.length) {
+      throw new Error('C/C++ input is larger than the terminal buffer.');
+    }
+
+    data.set(initialBytes);
+    Atomics.store(control, 0, initialBytes.length);
+    return buffer;
   }
 }
 

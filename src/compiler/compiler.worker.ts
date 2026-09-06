@@ -4,13 +4,13 @@
  * Browser-native C/C++ execution worker.
  *
  * Pipeline:
- *   compiler-client → postMessage({ code, language, stdin })
+ *   compiler-client → postMessage({ code, language, stdinBuffer })
  *   → browsercc.compile()   (Clang + LLD in WASM, produces a WASI module)
  *   → WASI.start()          (@bjorn3/browser_wasi_shim)
  *   → postMessage({ success, output, error, exitCode })
  *
- * stdin is upfront/prepared — it is provided before execution begins.
- * This is NOT live/interactive stdin. The UI must represent it accordingly.
+ * stdin is read from a shared buffer so terminal input can arrive while the
+ * WASI program is blocked in scanf/getchar.
  */
 
 import { compile } from 'browsercc';
@@ -25,7 +25,7 @@ import {
 interface WorkerRequest {
   code: string;
   language: 'c' | 'cpp';
-  /** Upfront/prepared stdin content (newline-separated lines). */
+  stdinBuffer: SharedArrayBuffer;
   stdin?: string;
 }
 
@@ -36,25 +36,57 @@ interface WorkerResponse {
   exitCode?: number | null;
 }
 
-const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+class SharedStdinFile extends OpenFile {
+  private readonly control: Int32Array;
+  private readonly data: Uint8Array;
+
+  public constructor(buffer: SharedArrayBuffer) {
+    super(new File(new Uint8Array(), { readonly: true }));
+    this.control = new Int32Array(buffer, 0, 4);
+    this.data = new Uint8Array(buffer, 16);
+  }
+
+  public override fd_read(size: number): {
+    ret: number;
+    data: Uint8Array;
+  } {
+    while (true) {
+      const writePosition = Atomics.load(this.control, 0);
+      const readPosition = Atomics.load(this.control, 1);
+
+      if (readPosition < writePosition) {
+        const end = Math.min(readPosition + size, writePosition);
+        const chunk = this.data.slice(readPosition, end);
+        Atomics.store(this.control, 1, end);
+        return { ret: 0, data: chunk };
+      }
+
+      if (Atomics.load(this.control, 2) === 1) {
+        return { ret: 0, data: new Uint8Array() };
+      }
+
+      const version = Atomics.load(this.control, 3);
+      Atomics.wait(this.control, 3, version);
+    }
+  }
+}
+
 /**
- * Runs a compiled WASI module with the provided stdin.
+ * Runs a compiled WASI module with terminal-backed stdin.
  * Returns { stdout, stderr, exitCode }.
  */
 const runWasiModule = (
   module: WebAssembly.Module,
-  stdin: string,
+  stdinBuffer: SharedArrayBuffer,
 ): { stdout: string; stderr: string; exitCode: number } => {
   let stdoutBuf = '';
   let stderrBuf = '';
 
-  const stdinBytes = encoder.encode(stdin.endsWith('\n') ? stdin : `${stdin}\n`);
-
   const fds = [
-    // fd 0 – stdin: prepared input file
-    new OpenFile(new File(stdinBytes)),
+    // fd 0 – stdin: terminal-backed shared input
+    new SharedStdinFile(stdinBuffer),
     // fd 1 – stdout
     new ConsoleStdout((chunk: Uint8Array) => {
       stdoutBuf += decoder.decode(chunk);
@@ -107,7 +139,7 @@ const runWasiModule = (
 self.onmessage = async (
   event: MessageEvent<WorkerRequest>,
 ): Promise<void> => {
-  const { code, language, stdin = '' } = event.data;
+  const { code, language, stdinBuffer } = event.data;
 
   const fileName =
     language === 'cpp' ? 'main.cpp' : 'main.c';
@@ -161,7 +193,10 @@ self.onmessage = async (
   }
 
   // Compilation succeeded – execute with WASI.
-  const { stdout, stderr, exitCode } = runWasiModule(module, stdin);
+  const { stdout, stderr, exitCode } = runWasiModule(
+    module,
+    stdinBuffer,
+  );
 
   // Combine stdout + stderr into a single output string so the terminal
   // receives them in a reasonable order.  stderr is appended after stdout
