@@ -1,6 +1,7 @@
 import {
+  getRedirectResult,
   onAuthStateChanged,
-  signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User,
 } from 'firebase/auth';
@@ -47,7 +48,13 @@ export const FirebaseAuthButton: FC = () => {
       return undefined;
     }
 
-    return onAuthStateChanged(firebaseAuth, setUser);
+    const unsubscribe = onAuthStateChanged(firebaseAuth, setUser);
+
+    void getRedirectResult(firebaseAuth).catch((authError: unknown) => {
+      setError(getAuthErrorMessage(authError));
+    });
+
+    return unsubscribe;
   }, []);
 
   const handleAuth = async (): Promise<void> => {
@@ -62,7 +69,7 @@ export const FirebaseAuthButton: FC = () => {
       if (user) {
         await signOut(firebaseAuth);
       } else {
-        await signInWithPopup(firebaseAuth, googleProvider);
+        await signInWithRedirect(firebaseAuth, googleProvider);
       }
     } catch (authError) {
       setError(getAuthErrorMessage(authError));
