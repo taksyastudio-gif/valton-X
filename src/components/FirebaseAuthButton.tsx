@@ -5,7 +5,7 @@ import {
   signOut,
   type User,
 } from 'firebase/auth';
-import { LogIn, LogOut } from 'lucide-react';
+import { LogIn, LogOut, UserRound } from 'lucide-react';
 import { useEffect, useState, type FC } from 'react';
 
 import {
@@ -121,28 +121,46 @@ export const FirebaseAuthButton: FC = () => {
     return null;
   }
 
-  const label = user
-    ? user.displayName ?? user.email ?? 'Account'
-    : 'Sign in';
-
   return (
     <div className="relative">
       <button
-        aria-label={user ? 'Sign out of Valton X' : 'Sign in with Google'}
-        className="secondary-action flex max-w-40 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium sm:px-3"
+        aria-label={
+          user
+            ? `Sign out of Valton X as ${user.displayName ?? user.email ?? 'Account'}`
+            : 'Sign in with Google'
+        }
+        className="secondary-action flex max-w-48 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium sm:px-3"
         disabled={isBusy || !isAuthReady}
         onClick={() => void handleAuth()}
-        title={user ? 'Sign out' : 'Sign in with Google'}
+        title={
+          user
+            ? `Signed in as ${user.email ?? user.displayName ?? 'Account'}. Click to sign out.`
+            : 'Sign in with Google'
+        }
         type="button"
       >
         {user ? (
-          <LogOut aria-hidden="true" size={13} />
+          user.photoURL ? (
+            <img
+              alt=""
+              className="h-4 w-4 rounded-full object-cover"
+              referrerPolicy="no-referrer"
+              src={user.photoURL}
+            />
+          ) : (
+            <UserRound aria-hidden="true" size={13} />
+          )
         ) : (
           <LogIn aria-hidden="true" size={13} />
         )}
         <span className="max-w-24 truncate sm:max-w-32">
-          {isBusy ? 'Working...' : label}
+          {isBusy
+            ? 'Working...'
+            : user
+              ? user.displayName ?? user.email ?? 'Profile'
+              : 'Sign in'}
         </span>
+        {user ? <LogOut aria-hidden="true" size={12} /> : null}
       </button>
 
       {error ? (
