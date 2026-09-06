@@ -9,6 +9,7 @@ import { LogIn, LogOut } from 'lucide-react';
 import { useEffect, useState, type FC } from 'react';
 
 import {
+  configureFirebasePersistence,
   firebaseAuth,
   googleProvider,
   isFirebaseConfigured,
@@ -55,6 +56,7 @@ const getAuthErrorMessage = (error: unknown): string => {
 export const FirebaseAuthButton: FC = () => {
   const [user, setUser] = useState<User | null>(null);
   const [isBusy, setIsBusy] = useState(false);
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -62,13 +64,35 @@ export const FirebaseAuthButton: FC = () => {
       return undefined;
     }
 
-    const unsubscribe = onAuthStateChanged(firebaseAuth, setUser);
+    let isMounted = true;
+    let unsubscribe: (() => void) | undefined;
 
-    void getRedirectResult(firebaseAuth).catch((authError: unknown) => {
-      setError(getAuthErrorMessage(authError));
-    });
+    void (async () => {
+      try {
+        await configureFirebasePersistence();
+        if (!isMounted) {
+          return;
+        }
 
-    return unsubscribe;
+        unsubscribe = onAuthStateChanged(firebaseAuth, (nextUser) => {
+          setUser(nextUser);
+          setIsAuthReady(true);
+        });
+
+        await getRedirectResult(firebaseAuth);
+        setIsAuthReady(true);
+      } catch (authError: unknown) {
+        if (isMounted) {
+          setError(getAuthErrorMessage(authError));
+          setIsAuthReady(true);
+        }
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+      unsubscribe?.();
+    };
   }, []);
 
   const handleAuth = async (): Promise<void> => {
@@ -83,6 +107,7 @@ export const FirebaseAuthButton: FC = () => {
       if (user) {
         await signOut(firebaseAuth);
       } else {
+        await configureFirebasePersistence();
         await signInWithRedirect(firebaseAuth, googleProvider);
       }
     } catch (authError) {
@@ -105,7 +130,7 @@ export const FirebaseAuthButton: FC = () => {
       <button
         aria-label={user ? 'Sign out of Valton X' : 'Sign in with Google'}
         className="secondary-action flex max-w-40 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium sm:px-3"
-        disabled={isBusy}
+        disabled={isBusy || !isAuthReady}
         onClick={() => void handleAuth()}
         title={user ? 'Sign out' : 'Sign in with Google'}
         type="button"

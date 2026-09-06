@@ -1,7 +1,9 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
 import {
+  browserLocalPersistence,
   getAuth,
   GoogleAuthProvider,
+  setPersistence,
   type Auth,
 } from 'firebase/auth';
 
@@ -28,6 +30,12 @@ if (isFirebaseConfigured) {
 
 export const firebaseAuth = auth;
 export const googleProvider = new GoogleAuthProvider();
+
+export const configureFirebasePersistence = async (): Promise<void> => {
+  if (firebaseAuth) {
+    await setPersistence(firebaseAuth, browserLocalPersistence);
+  }
+};
 
 export const getFirebaseIdToken = async (): Promise<string | null> => {
   if (!firebaseAuth?.currentUser) {
