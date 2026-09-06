@@ -32,8 +32,6 @@ interface ConsolePreviewPanelProps {
   onClearError?: () => void;
 
   onSendInput: (input: string) => void;
-  stdinInput?: string;
-  onStdinInputChange?: (value: string) => void;
   onClearTerminal: () => void;
   isWaitingForInput?: boolean;
   executionStatus: ExecutionStatus;
@@ -117,8 +115,6 @@ export const ConsolePreviewPanel: FC<
   onJumpToError,
   onClearError,
   onSendInput,
-  stdinInput = '',
-  onStdinInputChange,
   onClearTerminal,
   isWaitingForInput = false,
   executionStatus,
@@ -290,33 +286,6 @@ export const ConsolePreviewPanel: FC<
           ) : null}
 
           <div className="min-h-0 flex-1 overflow-hidden">
-            {onStdinInputChange ? (
-              <div className="border-b border-theme bg-surface-raised p-2">
-                <label
-                  className="mb-1 block text-[11px] font-semibold text-secondary"
-                  htmlFor="program-stdin"
-                >
-                  Program input (one value or line per input)
-                </label>
-                <textarea
-                  aria-describedby="program-stdin-help"
-                  className="input-field min-h-10 w-full resize-y rounded border px-2 py-1.5 text-xs outline-none"
-                  id="program-stdin"
-                  onChange={(event) =>
-                    onStdinInputChange(event.target.value)
-                  }
-                  placeholder="Example: 10 20"
-                  value={stdinInput}
-                />
-                <p
-                  className="mt-1 text-[10px] text-muted"
-                  id="program-stdin-help"
-                >
-                  Enter values before clicking Run Code. C and C++ read this
-                  text through standard input.
-                </p>
-              </div>
-            ) : null}
             <InteractiveTerminal
               clearGeneration={clearGeneration}
               isWaitingForInput={isWaitingForInput}

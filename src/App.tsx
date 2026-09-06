@@ -583,17 +583,6 @@ export const App = (): ReactElement => {
     [appendTerminalLog],
   );
 
-  const handleStdinInputChange = useCallback(
-    (value: string): void => {
-      setProgramInputs(
-        value.length === 0
-          ? []
-          : [{ id: 'program-stdin', value }],
-      );
-    },
-    [],
-  );
-
   const handleRun = useCallback(async (): Promise<void> => {
     const executionClient = executionClientRef.current;
 
@@ -839,13 +828,6 @@ export const App = (): ReactElement => {
               goToLineColumn(editorRef.current, line, column);
             }}
             onSendInput={handleSendInput}
-            onStdinInputChange={
-              activeFile?.language === 'c' ||
-              activeFile?.language === 'cpp'
-                ? handleStdinInputChange
-                : undefined
-            }
-            stdinInput={programInputs[0]?.value ?? ''}
             onTerminalPositionChange={setTerminalPosition}
             terminalLogs={terminalLogs}
             terminalPosition={terminalPosition}
