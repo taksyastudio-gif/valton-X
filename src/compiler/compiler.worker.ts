@@ -193,10 +193,28 @@ self.onmessage = async (
   }
 
   // Compilation succeeded – execute with WASI.
-  const { stdout, stderr, exitCode } = runWasiModule(
-    module,
-    stdinBuffer,
-  );
+  let executionResult: {
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+  };
+
+  try {
+    executionResult = runWasiModule(module, stdinBuffer);
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : String(error);
+
+    self.postMessage({
+      success: false,
+      output: '',
+      error: `[C/C++ runtime error] ${message}`,
+      exitCode: null,
+    } satisfies WorkerResponse);
+    return;
+  }
+
+  const { stdout, stderr, exitCode } = executionResult;
 
   // Combine stdout + stderr into a single output string so the terminal
   // receives them in a reasonable order.  stderr is appended after stdout
