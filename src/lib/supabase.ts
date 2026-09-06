@@ -50,17 +50,26 @@ export async function submitUserFeedback(
   const validatedPayload = validateFeedbackPayload(payload);
 
   if (supabase) {
-    const { error } = await supabase
-      .from('feedback')
-      .insert([validatedPayload]);
+    try {
+      const { error } = await supabase
+        .from('feedback')
+        .insert([validatedPayload]);
 
-    if (error) {
+      if (!error) {
+        return;
+      }
+
       throw new Error(
         error.message || 'Failed to submit feedback to Supabase.',
       );
-    }
+    } catch (error) {
+      if (error instanceof Error && error.message !== 'Failed to fetch') {
+        throw error;
+      }
 
-    return;
+      await submitFeedbackThroughRest(validatedPayload);
+      return;
+    }
   }
 
   await submitFeedbackThroughRest(validatedPayload);

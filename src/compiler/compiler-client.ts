@@ -222,6 +222,12 @@ export class CompilerClient {
   }
 
   private createStdinBuffer(initialInput: string): SharedArrayBuffer {
+    if (typeof SharedArrayBuffer === 'undefined' || !globalThis.crossOriginIsolated) {
+      throw new Error(
+        'C/C++ execution requires a cross-origin-isolated page. Reload the deployed site after the latest deployment.',
+      );
+    }
+
     const buffer = new SharedArrayBuffer(16 + 65536);
     const control = new Int32Array(buffer, 0, 4);
     const data = new Uint8Array(buffer, 16);
