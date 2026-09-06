@@ -638,9 +638,41 @@ export const App = (): ReactElement => {
 
     // Build the upfront stdin string from the prepared input items.
     // This is NOT live interactive stdin – inputs are prepared before Run is pressed.
-    const stdinString = programInputs
+    let stdinString = programInputs
       .map((item) => item.value)
       .join('\n');
+
+    const readsStandardInput =
+      activeFile.language === 'c' ||
+      activeFile.language === 'cpp'
+        ? /\b(scanf|fgets|getchar|getc|cin)\b/.test(
+            activeFile.content,
+          )
+        : false;
+
+    if (
+      readsStandardInput &&
+      programInputs.length === 0
+    ) {
+      const promptedInput = window.prompt(
+        'Enter program input. Use spaces or new lines between values:',
+        '',
+      );
+
+      if (promptedInput === null) {
+        setIsRunning(false);
+        setExecutionStatus('stopped');
+        appendTerminalLog(
+          '[Valton X] Execution cancelled before input was provided.',
+        );
+        return;
+      }
+
+      stdinString = promptedInput;
+      appendTerminalLog(
+        '[Valton X] Using the input provided before execution.',
+      );
+    }
 
     if (
       (activeFile.language === 'c' ||

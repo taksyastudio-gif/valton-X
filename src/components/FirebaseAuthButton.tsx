@@ -14,13 +14,24 @@ import {
 } from '../lib/firebase';
 
 const getAuthErrorMessage = (error: unknown): string => {
-  if (
+  const code =
     typeof error === 'object' &&
     error !== null &&
     'code' in error &&
-    error.code === 'auth/popup-closed-by-user'
-  ) {
+    typeof error.code === 'string'
+      ? error.code
+      : '';
+
+  if (code === 'auth/popup-closed-by-user') {
     return '';
+  }
+
+  if (code === 'auth/popup-blocked') {
+    return 'Your browser blocked the sign-in popup. Allow popups and try again.';
+  }
+
+  if (code === 'auth/unauthorized-domain') {
+    return 'This website is not authorized in Firebase Authentication.';
   }
 
   return 'Authentication could not be completed. Please try again.';
