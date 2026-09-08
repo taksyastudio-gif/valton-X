@@ -62,6 +62,7 @@ import type {
 } from './types/byteplay';
 
 type ForgeProjectFile = FileItem;
+type LanguageFilter = SupportedLanguage | 'all';
 
 const INITIAL_FILES: ForgeProjectFile[] = [
   {
@@ -187,6 +188,7 @@ const INITIAL_TERMINAL_LOGS = [
 const THEME_STORAGE_KEY = 'forgebytex-theme';
 const FILES_STORAGE_KEY = 'valton-x-files';
 const ACTIVE_FILE_STORAGE_KEY = 'valton-x-active-file';
+const LANGUAGE_FILTER_STORAGE_KEY = 'valton-x-language-filter';
 
 const createFileId = (): string =>
   `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -278,6 +280,31 @@ const getInitialActiveFileId = (
   return initialFiles[0]?.id ?? '';
 };
 
+const isLanguageFilter = (
+  value: string | null,
+): value is LanguageFilter =>
+  value === 'all' ||
+  value === 'c' ||
+  value === 'cpp' ||
+  value === 'python' ||
+  value === 'html' ||
+  value === 'css' ||
+  value === 'javascript' ||
+  value === 'sql' ||
+  value === 'plaintext';
+
+const getInitialLanguageFilter = (): LanguageFilter => {
+  if (typeof window === 'undefined') {
+    return 'all';
+  }
+
+  const savedFilter = window.localStorage.getItem(
+    LANGUAGE_FILTER_STORAGE_KEY,
+  );
+
+  return isLanguageFilter(savedFilter) ? savedFilter : 'all';
+};
+
 const getInitialWorkspace = (): {
   files: ForgeProjectFile[];
   activeFileId: string;
@@ -324,6 +351,8 @@ export const App = (): ReactElement => {
     useState<ForgeProjectFile[]>(INITIAL_WORKSPACE.files);
   const [activeFileId, setActiveFileId] =
     useState(INITIAL_WORKSPACE.activeFileId);
+  const [languageFilter, setLanguageFilter] =
+    useState<LanguageFilter>(getInitialLanguageFilter);
 
   const [activeTheme, setActiveTheme] =
     useState<EditorTheme>(getInitialTheme);
@@ -371,10 +400,45 @@ export const App = (): ReactElement => {
     );
 
   const executionGenerationRef = useRef(0);
+  const streamedOutputRef = useRef('');
+  const streamedOutputFrameRef = useRef<number | null>(null);
 
-  const activeFile =
-    files.find((file) => file.id === activeFileId) ??
-    files[0];
+  const visibleFiles =
+    languageFilter === 'all'
+      ? files
+      : files.filter((file) => file.language === languageFilter);
+  const visibleActiveFile =
+    visibleFiles.find((file) => file.id === activeFileId) ??
+    visibleFiles[0];
+  const activeFile = visibleActiveFile;
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      LANGUAGE_FILTER_STORAGE_KEY,
+      languageFilter,
+    );
+  }, [languageFilter]);
+
+  const handleLanguageFilterChange = useCallback(
+    (nextFilter: LanguageFilter): void => {
+      setLanguageFilter(nextFilter);
+
+      if (nextFilter !== 'all') {
+        setActiveFileId((currentId) =>
+          files.some(
+            (file) =>
+              file.id === currentId &&
+              file.language === nextFilter,
+          )
+            ? currentId
+            : files.find(
+                (file) => file.language === nextFilter,
+              )?.id ?? currentId,
+        );
+      }
+    },
+    [files],
+  );
 
   useEffect(() => {
     executionClientRef.current = new ExecutionClient();
@@ -437,6 +501,47 @@ export const App = (): ReactElement => {
     [],
   );
 
+  const flushStreamedOutput = useCallback((): void => {
+    streamedOutputFrameRef.current = null;
+
+    const output = streamedOutputRef.current;
+    if (!output) {
+      return;
+    }
+
+    streamedOutputRef.current = '';
+    setTerminalLogs((currentLogs) => [
+      ...currentLogs,
+      output,
+    ]);
+  }, []);
+
+  const discardStreamedOutput = useCallback((): void => {
+    const frame = streamedOutputFrameRef.current;
+    if (frame !== null) {
+      window.cancelAnimationFrame(frame);
+      streamedOutputFrameRef.current = null;
+    }
+    streamedOutputRef.current = '';
+  }, []);
+
+  const appendStreamedOutput = useCallback(
+    (text: string): void => {
+      if (!text) {
+        return;
+      }
+
+      streamedOutputRef.current += text;
+
+      if (streamedOutputFrameRef.current === null) {
+        streamedOutputFrameRef.current = window.requestAnimationFrame(
+          flushStreamedOutput,
+        );
+      }
+    },
+    [flushStreamedOutput],
+  );
+
   const handleSelectFile = useCallback(
     (fileId: string): void => {
       const selectedFile = files.find(
@@ -450,11 +555,12 @@ export const App = (): ReactElement => {
       setActiveFileId(fileId);
       setHtmlPreviewDoc(null);
       setErrorOutput('');
+      discardStreamedOutput();
       // Clear prepared inputs when switching files to prevent stale stdin.
       setProgramInputs([]);
       clearDiagnostics();
     },
-    [clearDiagnostics, files],
+    [clearDiagnostics, discardStreamedOutput, files],
   );
 
   const handleUpdateCode = useCallback(
@@ -611,6 +717,22 @@ export const App = (): ReactElement => {
     [appendTerminalLog],
   );
 
+  const handleInterrupt = useCallback((): void => {
+    executionGenerationRef.current += 1;
+    executionClientRef.current?.stop();
+    flushStreamedOutput();
+    setIsRunning(false);
+    setExecutionStatus('stopped');
+    setErrorOutput('');
+    appendTerminalLog(
+      '[Valton X] Execution stopped by the user.',
+    );
+  }, [appendTerminalLog, flushStreamedOutput]);
+
+  const handleEof = useCallback((): void => {
+    executionClientRef.current?.closeInput();
+  }, []);
+
   const handleRun = useCallback(async (): Promise<void> => {
     const executionClient = executionClientRef.current;
 
@@ -641,17 +763,33 @@ export const App = (): ReactElement => {
       const preview = buildWebPreview(files);
 
       setHtmlPreviewDoc(preview.document || null);
+      const previewHasErrors = preview.diagnostics.some(
+        (diagnostic) => diagnostic.severity === 'error',
+      );
       setExecutionStatus(
-        preview.diagnostics.some(
-          (diagnostic) => diagnostic.severity === 'error',
-        )
-          ? 'failed'
-          : 'completed',
+        previewHasErrors ? 'failed' : 'completed',
+      );
+      setErrorOutput(
+        previewHasErrors
+          ? preview.diagnostics
+              .filter(
+                (diagnostic) =>
+                  diagnostic.severity === 'error',
+              )
+              .map(
+                (diagnostic) =>
+                  `${diagnostic.fileName}: ${diagnostic.message}`,
+              )
+              .join('\n')
+          : '',
       );
 
       setTerminalLogs((currentLogs) => [
         ...currentLogs,
         `Rendered ${preview.entryFileName || 'web project'} preview.`,
+        ...(previewHasErrors
+          ? []
+          : ['[Doctor] Check-up skipped: the web preview is healthy.']),
       ]);
 
       return;
@@ -696,7 +834,7 @@ export const App = (): ReactElement => {
               return;
             }
 
-            appendTerminalLog(
+            appendStreamedOutput(
               attempt > 1
                 ? `[input retry ${attempt}] ${text}`
                 : text,
@@ -714,6 +852,7 @@ export const App = (): ReactElement => {
         return;
       }
 
+      flushStreamedOutput();
       setExecutionStatus(result.status);
       setIsRunning(false);
 
@@ -735,6 +874,13 @@ export const App = (): ReactElement => {
         }
       } else if (result.warnings) {
         appendTerminalLog(result.warnings);
+        appendTerminalLog(
+          '[Doctor] Check-up skipped: the program completed successfully with warnings.',
+        );
+      } else {
+        appendTerminalLog(
+          '[Doctor] Check-up skipped: the program completed successfully.',
+        );
       }
     } catch (error: unknown) {
       if (!isCurrentExecution()) {
@@ -746,14 +892,20 @@ export const App = (): ReactElement => {
           ? error.message
           : 'Execution failed unexpectedly.';
 
+      flushStreamedOutput();
       setExecutionStatus('failed');
       setIsRunning(false);
       setErrorOutput(message);
+      appendTerminalLog(
+        '[Doctor] Full check-up required: execution reported an unexpected failure.',
+      );
     }
   }, [
     activeFile,
     appendTerminalLog,
+    appendStreamedOutput,
     clearDiagnostics,
+    flushStreamedOutput,
     files,
     isRunning,
     programInputs,
@@ -764,8 +916,9 @@ export const App = (): ReactElement => {
     setClearGeneration((generation) => generation + 1);
     setHtmlPreviewDoc(null);
     setErrorOutput('');
+    discardStreamedOutput();
     setExecutionStatus('idle');
-  }, []);
+  }, [discardStreamedOutput]);
 
   const handleReset = useCallback((): void => {
     executionGenerationRef.current += 1;
@@ -777,30 +930,13 @@ export const App = (): ReactElement => {
     setClearGeneration((generation) => generation + 1);
     setHtmlPreviewDoc(null);
     setErrorOutput('');
+    discardStreamedOutput();
     setExecutionStatus('idle');
     setIsRunning(false);
     setProgramInputs([]);
 
     clearDiagnostics();
-  }, [clearDiagnostics]);
-
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'F5') {
-        event.preventDefault();
-        void handleRun();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-
-    return () => {
-      window.removeEventListener(
-        'keydown',
-        handleKeyDown,
-      );
-    };
-  }, [handleRun]);
+  }, [clearDiagnostics, discardStreamedOutput]);
 
   const editorFiles: ProjectFile[] = files.map((file) => ({
     id: file.id,
@@ -860,6 +996,8 @@ export const App = (): ReactElement => {
               goToLineColumn(editorRef.current, line, column);
             }}
             onSendInput={handleSendInput}
+            onInterrupt={handleInterrupt}
+            onEof={handleEof}
             onTerminalPositionChange={setTerminalPosition}
             terminalLogs={terminalLogs}
             terminalPosition={terminalPosition}
@@ -875,6 +1013,8 @@ export const App = (): ReactElement => {
       <HeaderControls
         activeTheme={activeTheme}
         isRunning={isRunning}
+        languageFilter={languageFilter}
+        onLanguageFilterChange={handleLanguageFilterChange}
         onThemeChange={setActiveTheme}
         onClear={handleClearTerminal}
         onExport={() => setIsExportOpen(true)}
@@ -945,8 +1085,11 @@ export const App = (): ReactElement => {
                   minSize="15"
                 >
                   <FileExplorer
-                    activeFileId={activeFile?.id ?? ''}
-                    files={editorFiles}
+                    activeFileId={visibleActiveFile?.id ?? ''}
+                    files={editorFiles.filter((file) =>
+                      languageFilter === 'all' ||
+                      file.language === languageFilter,
+                    )}
                     onAddFile={handleAddFile}
                     onChangeLanguage={handleChangeLanguage}
                     onDeleteFile={handleDeleteFile}
@@ -1004,8 +1147,8 @@ export const App = (): ReactElement => {
       />
 
       <ExportModal
-        activeFile={activeFile}
-        files={files}
+        activeFile={visibleActiveFile}
+        files={visibleFiles}
         isOpen={isExportOpen}
         onClose={() => setIsExportOpen(false)}
       />

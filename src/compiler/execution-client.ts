@@ -155,6 +155,27 @@ export class ExecutionClient {
     return false;
   }
 
+  public closeInput(): boolean {
+    if (!this.activeRequest || !this.activeLanguage) {
+      return false;
+    }
+
+    if (
+      this.activeLanguage === 'c' ||
+      this.activeLanguage === 'cpp'
+    ) {
+      this.compilerClient.closeInput();
+      return true;
+    }
+
+    if (this.activeLanguage === 'python') {
+      this.pythonClient.closeInput();
+      return true;
+    }
+
+    return false;
+  }
+
   /**
    * Stops the active worker execution.
    */

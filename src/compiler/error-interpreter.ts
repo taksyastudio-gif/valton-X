@@ -19,8 +19,23 @@ export interface HumorousErrorInsight {
     | 'type'
     | 'memory'
     | 'unknown';
+  diagnosticType?: DiagnosticType;
   confidence?: number;
 }
+
+export type DiagnosticType =
+  | 'compile_error'
+  | 'link_error'
+  | 'runtime_error'
+  | 'timeout'
+  | 'aborted'
+  | 'worker_crash'
+  | 'input_closed'
+  | 'output_limit'
+  | 'package_load_error'
+  | 'unsupported_feature'
+  | 'internal_error'
+  | 'unknown';
 
 /**
  * Backward-compatible alias used by existing diagnostic components.
@@ -45,6 +60,13 @@ export class ErrorInterpreter {
     }
 
     const normalizedLanguage = language.trim().toLowerCase();
+
+    const executionInsight = this.parseExecutionFailure(
+      normalizedError,
+    );
+    if (executionInsight) {
+      return executionInsight;
+    }
 
     if (
       normalizedLanguage === 'python' ||
@@ -542,6 +564,7 @@ export class ErrorInterpreter {
         'Read the raw message below, then check the highlighted line and the statements immediately before it.',
       emoji: '🛠️',
       category: 'unknown',
+      diagnosticType: this.inferDiagnosticType(rawError),
       confidence: 0.45,
     };
   }
@@ -559,7 +582,133 @@ export class ErrorInterpreter {
         'Run the program again and check the surrounding code for an empty file or incomplete statement.',
       emoji: '👻',
       category: 'unknown',
+      diagnosticType: 'unknown',
       confidence: 0.2,
     };
+  }
+
+  private static parseExecutionFailure(
+    rawError: string,
+  ): HumorousErrorInsight | null {
+    const lowerError = rawError.toLowerCase();
+    const location = this.extractLocation(rawError);
+
+    if (
+      lowerError.includes('output limit') ||
+      lowerError.includes('output-limit')
+    ) {
+      return {
+        rawError,
+        lineNumber: location.line,
+        columnNumber: location.column,
+        humorousTitle: 'The Output Monitor Reached Its Safety Limit.',
+        friendlyExplanation:
+          'The program produced more output than the browser terminal safely keeps in memory.',
+        suggestedFix:
+          'Reduce repeated printing, print only the required data, or move this workload to an isolated backend.',
+        emoji: '📟',
+        category: 'runtime',
+        diagnosticType: 'output_limit',
+        confidence: 0.99,
+      };
+    }
+
+    if (lowerError.includes('timed out') || lowerError.includes('timeout')) {
+      return {
+        rawError,
+        lineNumber: location.line,
+        columnNumber: location.column,
+        humorousTitle: 'The Runtime Check-Up Timed Out.',
+        friendlyExplanation:
+          'The program did not finish within the browser execution window.',
+        suggestedFix:
+          'Check for infinite loops or reduce the workload before running it again.',
+        emoji: '⏱️',
+        category: 'runtime',
+        diagnosticType: 'timeout',
+        confidence: 0.99,
+      };
+    }
+
+    if (
+      lowerError.includes('execution stopped') ||
+      lowerError.includes('aborted by the user')
+    ) {
+      return {
+        rawError,
+        lineNumber: location.line,
+        columnNumber: location.column,
+        humorousTitle: 'The Check-Up Was Stopped by the User.',
+        friendlyExplanation:
+          'Execution was intentionally interrupted before the program finished.',
+        suggestedFix:
+          'Run the program again when you are ready to continue.',
+        emoji: '🛑',
+        category: 'runtime',
+        diagnosticType: 'aborted',
+        confidence: 0.99,
+      };
+    }
+
+    if (
+      lowerError.includes('worker stopped unexpectedly') ||
+      lowerError.includes('worker error')
+    ) {
+      return {
+        rawError,
+        lineNumber: location.line,
+        columnNumber: location.column,
+        humorousTitle: 'The Runtime Worker Needs Attention.',
+        friendlyExplanation:
+          'The browser worker stopped before it could return a normal program result.',
+        suggestedFix:
+          'Run the program again. If this repeats, refresh the page and check browser isolation support.',
+        emoji: '🩺',
+        category: 'runtime',
+        diagnosticType: 'worker_crash',
+        confidence: 0.95,
+      };
+    }
+
+    return null;
+  }
+
+  private static inferDiagnosticType(
+    rawError: string,
+  ): DiagnosticType {
+    const lowerError = rawError.toLowerCase();
+
+    if (
+      lowerError.includes('linker') ||
+      lowerError.includes('undefined reference') ||
+      lowerError.includes('wasm-ld')
+    ) {
+      return 'link_error';
+    }
+
+    if (
+      lowerError.includes('error:') ||
+      lowerError.includes('syntaxerror') ||
+      lowerError.includes('compilation failed')
+    ) {
+      return 'compile_error';
+    }
+
+    if (
+      lowerError.includes('internal error') ||
+      lowerError.includes('unable to start')
+    ) {
+      return 'internal_error';
+    }
+
+    if (
+      lowerError.includes('runtime error') ||
+      lowerError.includes('exception') ||
+      lowerError.includes('trap')
+    ) {
+      return 'runtime_error';
+    }
+
+    return 'unknown';
   }
 }

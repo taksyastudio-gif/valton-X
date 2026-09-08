@@ -14,6 +14,8 @@ interface InteractiveTerminalProps {
   terminalLogs: string[];
   isWaitingForInput?: boolean;
   onInput: (value: string) => void;
+  onInterrupt?: () => void;
+  onEof?: () => void;
   clearGeneration?: number;
   theme?: EditorTheme;
 }
@@ -63,12 +65,52 @@ const XTERM_THEMES: Record<EditorTheme, ITheme> = {
   },
 };
 
+const fitTerminal = (
+  terminal: Terminal,
+  container: HTMLDivElement,
+): void => {
+  const measure = container.querySelector(
+    '.xterm-char-measure-element',
+  );
+  const rect = measure?.getBoundingClientRect();
+  if (
+    !rect ||
+    !Number.isFinite(rect.width) ||
+    !Number.isFinite(rect.height) ||
+    rect.width < 4 ||
+    rect.height < 8
+  ) {
+    return;
+  }
+
+  const width = rect.width;
+  const height = rect.height;
+  const cols = Math.max(
+    1,
+    Math.floor((container.clientWidth - 4) / width),
+  );
+  const rows = Math.max(
+    1,
+    Math.floor((container.clientHeight - 4) / height),
+  );
+
+  if (cols < 20 || rows < 5) {
+    return;
+  }
+
+  if (cols !== terminal.cols || rows !== terminal.rows) {
+    terminal.resize(cols, rows);
+  }
+};
+
 export const InteractiveTerminal: FC<
   InteractiveTerminalProps
 > = ({
   terminalLogs,
   isWaitingForInput = false,
   onInput,
+  onInterrupt,
+  onEof,
   clearGeneration = 0,
   theme = 'black',
 }) => {
@@ -76,7 +118,12 @@ export const InteractiveTerminal: FC<
   const terminalRef = useRef<Terminal | null>(null);
 
   const inputBufferRef = useRef('');
+  const cursorPositionRef = useRef(0);
+  const historyRef = useRef<string[]>([]);
+  const historyIndexRef = useRef(-1);
   const onInputRef = useRef(onInput);
+  const onInterruptRef = useRef(onInterrupt);
+  const onEofRef = useRef(onEof);
   const waitingRef = useRef(isWaitingForInput);
 
   const previousLogCountRef = useRef(0);
@@ -86,6 +133,11 @@ export const InteractiveTerminal: FC<
   useEffect(() => {
     onInputRef.current = onInput;
   }, [onInput]);
+
+  useEffect(() => {
+    onInterruptRef.current = onInterrupt;
+    onEofRef.current = onEof;
+  }, [onEof, onInterrupt]);
 
   useEffect(() => {
     waitingRef.current = isWaitingForInput;
@@ -133,29 +185,71 @@ export const InteractiveTerminal: FC<
 
       terminal.open(container);
       terminal.focus();
+      fitTerminal(terminal, container);
     });
 
     const dataSubscription = terminal.onData((data) => {
+      if (data === '\u0003') {
+        terminal.write('^C\r\n');
+        inputBufferRef.current = '';
+        cursorPositionRef.current = 0;
+        historyIndexRef.current = -1;
+        onInterruptRef.current?.();
+        return;
+      }
+
+      if (data === '\u0004') {
+        if (!inputBufferRef.current) {
+          terminal.write('^D\r\n');
+          onEofRef.current?.();
+        }
+        return;
+      }
+
+      if (data === '\u000c') {
+        terminal.clear();
+        terminal.write('\r\n');
+        return;
+      }
+
       if (!waitingRef.current) {
         return;
       }
 
       if (data === '\u007f' || data === '\b') {
-        if (inputBufferRef.current.length === 0) {
+        if (cursorPositionRef.current === 0) {
           return;
         }
 
         inputBufferRef.current =
-          inputBufferRef.current.slice(0, -1);
-
-        terminal.write('\b \b');
+          inputBufferRef.current.slice(
+            0,
+            cursorPositionRef.current - 1,
+          ) +
+          inputBufferRef.current.slice(cursorPositionRef.current);
+        cursorPositionRef.current -= 1;
+        redrawInput(
+          terminal,
+          inputBufferRef.current,
+          cursorPositionRef.current,
+        );
         return;
       }
 
       if (data === '\r' || data === '\n') {
         const input = inputBufferRef.current;
 
+        if (input) {
+          historyRef.current = [
+            ...historyRef.current.filter(
+              (entry) => entry !== input,
+            ),
+            input,
+          ].slice(-50);
+        }
+        historyIndexRef.current = -1;
         inputBufferRef.current = '';
+        cursorPositionRef.current = 0;
 
         terminal.write('\r\n');
 
@@ -165,32 +259,122 @@ export const InteractiveTerminal: FC<
         return;
       }
 
-      // Ignore control sequences that should not become source input.
+      if (data === '\u001b[A' || data === '\u001b[B') {
+        const history = historyRef.current;
+        if (history.length === 0) {
+          return;
+        }
+        if (data === '\u001b[A') {
+          historyIndexRef.current = Math.min(
+            historyIndexRef.current + 1,
+            history.length - 1,
+          );
+        } else {
+          historyIndexRef.current = Math.max(
+            historyIndexRef.current - 1,
+            -1,
+          );
+        }
+        inputBufferRef.current =
+          historyIndexRef.current >= 0
+            ? history[
+                history.length - 1 - historyIndexRef.current
+              ]
+            : '';
+        cursorPositionRef.current = inputBufferRef.current.length;
+        redrawInput(
+          terminal,
+          inputBufferRef.current,
+          cursorPositionRef.current,
+        );
+        return;
+      }
+
+      if (data === '\u001b[D') {
+        cursorPositionRef.current = Math.max(
+          cursorPositionRef.current - 1,
+          0,
+        );
+        terminal.write('\u001b[D');
+        return;
+      }
+
+      if (data === '\u001b[C') {
+        cursorPositionRef.current = Math.min(
+          cursorPositionRef.current + 1,
+          inputBufferRef.current.length,
+        );
+        terminal.write('\u001b[C');
+        return;
+      }
+
       if (data.startsWith('\u001b')) {
         return;
       }
 
-      inputBufferRef.current += data;
-      terminal.write(data);
-    });
-
-    const resizeObserver = new ResizeObserver(() => {
-      terminal.resize(
-        Math.max(terminal.cols, 1),
-        Math.max(terminal.rows, 1),
+      inputBufferRef.current =
+        inputBufferRef.current.slice(
+          0,
+          cursorPositionRef.current,
+        ) +
+        data +
+        inputBufferRef.current.slice(cursorPositionRef.current);
+      cursorPositionRef.current += data.length;
+      redrawInput(
+        terminal,
+        inputBufferRef.current,
+        cursorPositionRef.current,
       );
     });
 
+    const pasteHandler = (event: ClipboardEvent): void => {
+      if (!waitingRef.current) {
+        return;
+      }
+
+      const pasted = event.clipboardData?.getData('text/plain');
+      if (!pasted) {
+        return;
+      }
+
+      event.preventDefault();
+      const normalized = pasted
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/\n/g, ' ');
+      inputBufferRef.current =
+        inputBufferRef.current.slice(
+          0,
+          cursorPositionRef.current,
+        ) +
+        normalized +
+        inputBufferRef.current.slice(cursorPositionRef.current);
+      cursorPositionRef.current += normalized.length;
+      redrawInput(
+        terminal,
+        inputBufferRef.current,
+        cursorPositionRef.current,
+      );
+    };
+
+    const resizeObserver = new ResizeObserver(() => {
+      fitTerminal(terminal, container);
+    });
+
+    container.addEventListener('paste', pasteHandler);
     resizeObserver.observe(container);
 
     return () => {
       window.cancelAnimationFrame(openFrame);
       dataSubscription.dispose();
       resizeObserver.disconnect();
+      container.removeEventListener('paste', pasteHandler);
 
       terminal.dispose();
       terminalRef.current = null;
       inputBufferRef.current = '';
+      cursorPositionRef.current = 0;
+      historyIndexRef.current = -1;
       previousLogCountRef.current = 0;
     };
   }, [theme]);
@@ -221,6 +405,8 @@ export const InteractiveTerminal: FC<
 
       previousLogCountRef.current = 0;
       inputBufferRef.current = '';
+      cursorPositionRef.current = 0;
+      historyIndexRef.current = -1;
 
       terminal.clear();
       terminal.reset();
@@ -271,6 +457,18 @@ export const InteractiveTerminal: FC<
       />
     </div>
   );
+};
+
+const redrawInput = (
+  terminal: Terminal,
+  value: string,
+  cursorPosition: number,
+): void => {
+  const cursorOffset = value.length - cursorPosition;
+  terminal.write(`\r\x1b[2K${value}`);
+  if (cursorOffset > 0) {
+    terminal.write(`\x1b[${cursorOffset}D`);
+  }
 };
 
 const formatTerminalEntry = (text: string): string => {

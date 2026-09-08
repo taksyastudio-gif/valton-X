@@ -28,6 +28,10 @@ const ASSETS = [
   'pyodide-lock.json',
 ];
 
+const REQUIRED_LOCAL_PACKAGES = [
+  'sqlite3-1.0.0.zip',
+];
+
 for (const asset of ASSETS) {
   const src = join(pkgDir, asset);
   if (!existsSync(src)) {
@@ -37,4 +41,15 @@ for (const asset of ASSETS) {
   copyFileSync(src, join(destDir, asset));
 }
 
-console.log(`[copy-pyodide] copied ${ASSETS.length} assets -> public/pyodide`);
+for (const asset of REQUIRED_LOCAL_PACKAGES) {
+  const destination = join(destDir, asset);
+  if (!existsSync(destination)) {
+    console.warn(
+      `[copy-pyodide] missing local package: ${asset}`,
+    );
+  }
+}
+
+console.log(
+  `[copy-pyodide] copied ${ASSETS.length} assets -> public/pyodide`,
+);

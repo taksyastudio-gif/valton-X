@@ -33,6 +33,10 @@ export type ExecutionStatus =
 
 export type OutputStream = 'stdout' | 'stderr';
 
+export const MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
+export const OUTPUT_LIMIT_MESSAGE =
+  '[Valton X] Output limit reached; further output was truncated.';
+
 export type ExecutionPhase = 'compile' | 'link' | 'run';
 
 export interface ExecutionRequest {
@@ -69,6 +73,11 @@ export type RuntimeRequest =
       code?: string;
       language?: SupportedLanguage;
       stdin?: string;
+      stdinBuffer?: SharedArrayBuffer;
+    }
+  | {
+      type: 'stop';
+      requestId?: string;
       stdinBuffer?: SharedArrayBuffer;
     };
 

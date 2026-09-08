@@ -71,7 +71,7 @@ export const FriendlyErrorPanel: FC<
 
           <div className="min-w-0">
             <p className="mb-1 text-[10px] font-semibold uppercase tracking-widest text-rose-300/70">
-              Valton X Error Doctor
+              Valton X Error Doctor · Full check-up
             </p>
 
             <h3 className="text-sm font-bold tracking-wide text-rose-400">
@@ -100,6 +100,11 @@ export const FriendlyErrorPanel: FC<
               insight.category !== 'unknown' ? (
                 <span className="uppercase tracking-wider text-slate-500">
                   {insight.category}
+                </span>
+              ) : null}
+              {insight.diagnosticType ? (
+                <span className="rounded border border-cyan-500/20 px-1.5 py-0.5 uppercase tracking-wider text-cyan-300/80">
+                  {insight.diagnosticType.replaceAll('_', ' ')}
                 </span>
               ) : null}
             </div>
@@ -135,7 +140,7 @@ export const FriendlyErrorPanel: FC<
               className="text-amber-300"
               size={14}
             />
-            What happened?
+            Doctor&apos;s findings
           </span>
 
           {showExplanation ? (
@@ -159,13 +164,13 @@ export const FriendlyErrorPanel: FC<
             id="error-doctor-explanation"
           >
             <p className="text-xs leading-relaxed text-slate-300">
-              {insight.friendlyExplanation}
+              Diagnosis: {insight.friendlyExplanation}
             </p>
 
             {insight.confidence !== undefined &&
             insight.confidence < 0.7 ? (
               <p className="text-[11px] leading-relaxed text-amber-300">
-                We are not fully certain about this diagnosis.
+                The doctor cannot make a fully certain diagnosis yet.
                 Check the reported line and the lines immediately
                 above it.
               </p>
@@ -177,11 +182,11 @@ export const FriendlyErrorPanel: FC<
       <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 p-3">
         <h4 className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
           <span aria-hidden="true">💡</span>
-          Easy fix
+          Doctor&apos;s prescription
         </h4>
 
         <p className="rounded border border-emerald-500/20 bg-emerald-950/40 p-2 font-mono text-xs leading-relaxed text-emerald-200/90">
-          {insight.suggestedFix}
+          Prescription: {insight.suggestedFix}
         </p>
       </div>
 
@@ -212,7 +217,7 @@ export const FriendlyErrorPanel: FC<
           ) : (
             <ChevronRight aria-hidden="true" size={13} />
           )}
-          {showRawLog ? 'Hide raw log' : 'Show raw log'}
+          {showRawLog ? 'Hide lab report' : 'Show lab report'}
         </button>
       </div>
 

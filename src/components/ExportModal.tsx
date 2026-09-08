@@ -5,11 +5,10 @@ import {
   Mail,
   X,
 } from 'lucide-react';
-import { Turnstile } from '@marsidev/react-turnstile';
-import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FC,
   type MouseEvent,
@@ -17,10 +16,6 @@ import {
 } from 'react';
 
 import type { FileItem } from '../types/byteplay';
-import {
-  firebaseAuth,
-  getFirebaseIdToken,
-} from '../lib/firebase';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -69,6 +64,8 @@ interface PreparedZipEntry {
 const MAX_FILE_COUNT = 100;
 const MAX_FILE_SIZE = 1024 * 1024;
 const MAX_PROJECT_SIZE = 10 * 1024 * 1024;
+const MAX_MAILTO_BODY_BYTES = 60 * 1024;
+const MAX_MAILTO_URL_CHARS = 100_000;
 
 const ExportOption: FC<ExportOptionProps> = ({
   checked,
@@ -134,15 +131,11 @@ export const ExportModal: FC<ExportModalProps> = ({
     useState<ExportFormat>('file');
   const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [fallbackAvailable, setFallbackAvailable] = useState(false);
   const [email, setEmail] = useState('');
-  const [user, setUser] = useState<User | null>(
-    firebaseAuth?.currentUser ?? null,
+  const [selectedFileIds, setSelectedFileIds] = useState<string[]>(
+    files.map((file) => file.id),
   );
-  const [turnstileToken, setTurnstileToken] = useState('');
-
-  const turnstileSiteKey =
-    import.meta.env.VITE_TURNSTILE_SITE_KEY ?? '';
+  const previousFileIds = useRef(files.map((file) => file.id));
 
   const normalizedFiles = useMemo(
     () =>
@@ -153,17 +146,6 @@ export const ExportModal: FC<ExportModalProps> = ({
         }))
         .filter((file) => file.name.length > 0),
     [files],
-  );
-
-  const projectSize = useMemo(
-    () =>
-      normalizedFiles.reduce(
-        (total, file) =>
-          total +
-          new TextEncoder().encode(file.content).byteLength,
-        0,
-      ),
-    [normalizedFiles],
   );
 
   const webEntryPoint = useMemo(
@@ -182,14 +164,48 @@ export const ExportModal: FC<ExportModalProps> = ({
 
   const projectBundle = useMemo(
     () =>
-      normalizedFiles
+      normalizedFiles.filter((file) =>
+        selectedFileIds.includes(file.id),
+      )
         .map(
           (file) =>
             `===== ${file.name} =====\n\n${file.content}\n\n`,
         )
         .join(''),
-    [normalizedFiles],
+    [normalizedFiles, selectedFileIds],
   );
+
+  const selectedFiles = useMemo(
+    () =>
+      normalizedFiles.filter((file) =>
+        selectedFileIds.includes(file.id),
+      ),
+    [normalizedFiles, selectedFileIds],
+  );
+
+  const projectSize = useMemo(
+    () =>
+      selectedFiles.reduce(
+        (total, file) =>
+          total +
+          new TextEncoder().encode(file.content).byteLength,
+        0,
+      ),
+    [selectedFiles],
+  );
+
+  useEffect(() => {
+    const currentFileIds = files.map((file) => file.id);
+    const addedFileIds = currentFileIds.filter(
+      (id) => !previousFileIds.current.includes(id),
+    );
+
+    setSelectedFileIds((currentIds) => [
+      ...currentIds.filter((id) => currentFileIds.includes(id)),
+      ...addedFileIds,
+    ]);
+    previousFileIds.current = currentFileIds;
+  }, [files]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -211,14 +227,6 @@ export const ExportModal: FC<ExportModalProps> = ({
       );
     };
   }, [isExporting, isOpen, onClose]);
-
-  useEffect(() => {
-    if (!firebaseAuth) {
-      return undefined;
-    }
-
-    return onAuthStateChanged(firebaseAuth, setUser);
-  }, []);
 
   if (!isOpen) {
     return null;
@@ -244,12 +252,14 @@ export const ExportModal: FC<ExportModalProps> = ({
     }, 0);
   };
 
-  const validateProject = (): string | null => {
-    if (normalizedFiles.length === 0) {
-      return 'There are no valid files to export.';
+  const validateProject = (
+    exportFiles: FileItem[],
+  ): string | null => {
+    if (exportFiles.length === 0) {
+      return 'Select at least one project file to export.';
     }
 
-    if (normalizedFiles.length > MAX_FILE_COUNT) {
+    if (exportFiles.length > MAX_FILE_COUNT) {
       return `Projects may contain at most ${MAX_FILE_COUNT} files.`;
     }
 
@@ -257,7 +267,7 @@ export const ExportModal: FC<ExportModalProps> = ({
       return 'The project is larger than the 10 MB browser export limit.';
     }
 
-    const oversizedFile = normalizedFiles.find(
+    const oversizedFile = exportFiles.find(
       (file) =>
         new TextEncoder().encode(file.content).byteLength >
         MAX_FILE_SIZE,
@@ -265,6 +275,35 @@ export const ExportModal: FC<ExportModalProps> = ({
 
     if (oversizedFile) {
       return `${oversizedFile.name} is larger than the 1 MB per-file export limit.`;
+    }
+
+    const normalizedPaths = exportFiles.map((file) => file.name);
+    if (
+      new Set(normalizedPaths).size !== normalizedPaths.length
+    ) {
+      return 'Each exported file must have a unique path.';
+    }
+
+    return null;
+  };
+
+  const validateMailto = (
+    exportFiles: FileItem[],
+  ): string | null => {
+    if (exportFiles.length === 0) {
+      return 'Select at least one project file to share.';
+    }
+
+    const rawBytes = new TextEncoder().encode(projectBundle).byteLength;
+    if (rawBytes > MAX_MAILTO_BODY_BYTES) {
+      return 'The selected source is too large for a mailto message. Use ZIP export instead.';
+    }
+
+    const encodedBody = encodeURIComponent(
+      `Valton X project source\n\n${projectBundle}`,
+    );
+    if (encodedBody.length > MAX_MAILTO_URL_CHARS) {
+      return 'The email link is too large for your email app. Use ZIP export instead.';
     }
 
     return null;
@@ -278,7 +317,6 @@ export const ExportModal: FC<ExportModalProps> = ({
 
     setIsExporting(true);
     setError(null);
-    setFallbackAvailable(false);
 
     try {
       if (format === 'file') {
@@ -298,82 +336,18 @@ export const ExportModal: FC<ExportModalProps> = ({
       }
 
       if (format === 'email') {
-        if (normalizedFiles.length === 0) {
-          setError('There are no project files to share.');
+        const mailtoError = validateMailto(selectedFiles);
+        if (mailtoError) {
+          setError(mailtoError);
           return;
         }
 
-        if (!user) {
-          setError('Sign in before sending an email export.');
-          return;
-        }
-
-        if (!turnstileSiteKey || !turnstileToken) {
-          setError('Complete the security check before sending.');
-          return;
-        }
-
-        const idToken = await getFirebaseIdToken();
-
-        if (!idToken) {
-          setError('Your sign-in session expired. Please sign in again.');
-          return;
-        }
-
-        const subject = `Valton X export: ${activeFile?.name ?? 'source code'}`;
-        const payload = {
-          email,
-          filename: activeFile?.name ?? 'source.txt',
-          content: projectBundle,
-          subject,
-        };
-
-        const response = await fetch('/api/export-email', {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${idToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            ...payload,
-            turnstileToken,
-          }),
-        });
-
-        if (!response.ok) {
-          const responseText = await response.text();
-          let data: { error?: unknown; fallbackAllowed?: unknown } = {};
-
-          try {
-            data = JSON.parse(responseText) as typeof data;
-          } catch {
-            // Vercel may return an HTML/text error page for a failed function.
-          }
-
-          if (data?.fallbackAllowed) {
-            setFallbackAvailable(true);
-            setError(
-              typeof data.error === 'string'
-                ? data.error
-                : `Email delivery failed (HTTP ${response.status}).`,
-            );
-            return;
-          }
-
-          const serverError =
-            typeof data.error === 'string' ? data.error : responseText.trim();
-
-          throw new Error(
-            serverError ||
-              `Email export failed with HTTP ${response.status}.`,
-          );
-        }
-
+        await openMailComposer(email, activeFile, projectBundle);
         onClose();
         return;
       }
 
-      const validationError = validateProject();
+      const validationError = validateProject(selectedFiles);
 
       if (validationError) {
         setError(validationError);
@@ -408,12 +382,7 @@ export const ExportModal: FC<ExportModalProps> = ({
   const isExportDisabled =
     isExporting ||
     (format === 'file' && !activeFile) ||
-    (format === 'email' &&
-      (!user ||
-        !turnstileSiteKey ||
-        !turnstileToken ||
-        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) ||
-    (format !== 'file' && format !== 'email' && normalizedFiles.length === 0);
+    (format !== 'file' && selectedFiles.length === 0);
 
   const downloadProjectZip = (): void => {
     const manifest: VlntoxManifest = {
@@ -421,7 +390,7 @@ export const ExportModal: FC<ExportModalProps> = ({
       version: 1,
       createdAt: new Date().toISOString(),
       entrypoints: webEntryPoint ? { web: webEntryPoint } : {},
-      files: normalizedFiles.map((file) => ({
+      files: selectedFiles.map((file) => ({
         path: file.name,
         language: file.language,
         isWebProjectFile:
@@ -436,7 +405,7 @@ export const ExportModal: FC<ExportModalProps> = ({
         path: 'vlntox.json',
         content: JSON.stringify(manifest, null, 2),
       },
-      ...normalizedFiles.map((file) => ({
+      ...selectedFiles.map((file) => ({
         path: file.name,
         content: file.content,
       })),
@@ -447,16 +416,6 @@ export const ExportModal: FC<ExportModalProps> = ({
       toBlobArrayBuffer(archive),
       'application/zip',
     );
-  };
-
-  const openMailFallback = (): void => {
-    const subject = encodeURIComponent(
-      `Valton X project export: ${activeFile?.name ?? 'source code'}`,
-    );
-    const body = encodeURIComponent(
-      'I downloaded the Valton X project ZIP and attached it to this email.',
-    );
-    window.location.href = `mailto:${encodeURIComponent(email)}?subject=${subject}&body=${body}`;
   };
 
   return (
@@ -516,91 +475,99 @@ export const ExportModal: FC<ExportModalProps> = ({
 
           <ExportOption
             checked={format === 'project'}
-            description={`Download ${normalizedFiles.length} project file${
-              normalizedFiles.length === 1 ? '' : 's'
-            } as a ZIP archive with a Valton X manifest.`}
+            description={`Download selected project files as a ZIP archive with a Valton X manifest.`}
             disabled={normalizedFiles.length === 0}
             icon={<FileArchive size={15} />}
             onSelect={() => setFormat('project')}
-            title="Export complete project ZIP"
+            title="Export selected files as ZIP"
           />
 
           <ExportOption
             checked={format === 'email'}
-            description="Send the project source to a recipient email via the Valton X export service."
+            description="Open your email app with the selected project source copied into a new message."
             disabled={normalizedFiles.length === 0}
             icon={<Mail size={15} />}
             onSelect={() => setFormat('email')}
-            title="Share through email"
+            title="Email selected files"
           />
         </div>
 
-        {format === 'project' ? (
-          <p className="mt-3 text-[11px] text-muted">
-            Archive size: {formatBytes(projectSize)}. Maximum
-            project size: 10 MB.
-          </p>
-        ) : null}
-
-        {fallbackAvailable ? (
-          <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
-            <p className="text-xs text-amber-200">
-              Email delivery is unavailable or today&apos;s export was already
-              used. Download the ZIP and attach it manually.
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                className="secondary-action rounded px-3 py-2 text-xs font-semibold"
-                onClick={downloadProjectZip}
-                type="button"
-              >
-                Download ZIP
-              </button>
-              <button
-                className="secondary-action rounded px-3 py-2 text-xs font-semibold"
-                onClick={openMailFallback}
-                type="button"
-              >
-                Open mail app
-              </button>
+        {format !== 'file' ? (
+          <div className="mt-4 rounded-lg border border-theme bg-surface-raised p-3">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <p className="text-xs font-semibold text-primary">
+                Choose files ({selectedFiles.length}/{normalizedFiles.length})
+              </p>
+              <div className="flex gap-2">
+                <button
+                  className="text-[11px] font-semibold text-blue-400 hover:text-blue-300"
+                  onClick={() =>
+                    setSelectedFileIds(
+                      normalizedFiles.map((file) => file.id),
+                    )
+                  }
+                  type="button"
+                >
+                  Select all
+                </button>
+                <button
+                  className="text-[11px] font-semibold text-secondary hover:text-primary"
+                  onClick={() => setSelectedFileIds([])}
+                  type="button"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+            <div className="max-h-40 space-y-2 overflow-y-auto">
+              {normalizedFiles.map((file) => (
+                <label
+                  className="flex cursor-pointer items-center gap-2 text-xs text-secondary"
+                  key={file.id}
+                >
+                  <input
+                    checked={selectedFileIds.includes(file.id)}
+                    onChange={(event) =>
+                      setSelectedFileIds((currentIds) =>
+                        event.target.checked
+                          ? [...currentIds, file.id]
+                          : currentIds.filter(
+                              (id) => id !== file.id,
+                            ),
+                      )
+                    }
+                    type="checkbox"
+                  />
+                  <span className="truncate">{file.name}</span>
+                </label>
+              ))}
             </div>
           </div>
+        ) : null}
+
+        {format === 'project' ? (
+          <p className="mt-3 text-[11px] text-muted">
+            Selected archive size: {formatBytes(projectSize)}. Maximum
+            project size: 10 MB.
+          </p>
         ) : null}
 
         {format === 'email' ? (
           <div className="mt-3">
             <p className="mb-2 text-[11px] text-secondary">
-              {user
-                ? 'Your account is required to protect the export service.'
-                : 'Sign in from the header before sending an email export.'}
+              Your default email app will open with the selected source in
+              the message body. No sign-in or Valton X email service is used.
             </p>
-            <label className="block text-xs font-semibold text-secondary mb-1">
-              Recipient email
+            <label className="mb-1 block text-xs font-semibold text-secondary">
+              Recipient email (optional)
             </label>
             <input
               type="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(event) => setEmail(event.target.value)}
               placeholder="you@example.com"
               className="input-field w-full rounded-lg border px-3 py-2 text-xs outline-none"
             />
-            {turnstileSiteKey ? (
-              <div className="mt-3">
-                <Turnstile
-                  onError={() => {
-                    setTurnstileToken('');
-                    setError('Security check failed. Please try again.');
-                  }}
-                  onExpire={() => setTurnstileToken('')}
-                  onSuccess={setTurnstileToken}
-                  siteKey={turnstileSiteKey}
-                />
-              </div>
-            ) : (
-              <p className="mt-2 text-[11px] text-amber-300">
-                Turnstile is not configured for this environment.
-              </p>
-            )}
           </div>
         ) : null}
 
@@ -663,17 +630,60 @@ const getActionLabel = (
   }
 };
 
+const openMailComposer = async (
+  recipient: string,
+  activeFile: FileItem | undefined,
+  projectBundle: string,
+): Promise<void> => {
+  try {
+    await navigator.clipboard.writeText(projectBundle);
+  } catch {
+    // The mailto body remains available when clipboard permission is denied.
+  }
+
+  const subject = encodeURIComponent(
+    `Valton X project export: ${activeFile?.name ?? 'source code'}`,
+  );
+  const body = encodeURIComponent(
+    `Valton X project source\n\n${projectBundle}`,
+  );
+  const destination = recipient.trim()
+    ? encodeURIComponent(recipient.trim())
+    : '';
+
+  window.location.href =
+    `mailto:${destination}?subject=${subject}&body=${body}`;
+};
+
 const normalizeArchivePath = (value: string): string => {
   const parts: string[] = [];
 
-  for (const part of value.replaceAll('\\', '/').split('/')) {
+  const normalizedValue = value.replaceAll('\\', '/');
+  if (
+    normalizedValue.startsWith('/') ||
+    /^[A-Za-z]:\//.test(normalizedValue)
+  ) {
+    return '';
+  }
+
+  for (const part of normalizedValue.split('/')) {
     if (!part || part === '.') {
       continue;
     }
 
     if (part === '..') {
+      if (parts.length === 0) {
+        return '';
+      }
       parts.pop();
       continue;
+    }
+
+    if ([...part].some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f;
+    })) {
+      return '';
     }
 
     parts.push(part);

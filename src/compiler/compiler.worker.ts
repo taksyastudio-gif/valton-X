@@ -27,22 +27,38 @@ import {
   ConsoleStdout,
   PreopenDirectory,
 } from '@bjorn3/browser_wasi_shim';
+import {
+  closeSharedStdin,
+  getSharedStdin,
+  readSharedStdin,
+  STDIN_ABORTED,
+  STDIN_CLOSED,
+} from './shared-stdin';
+import {
+  MAX_OUTPUT_BYTES,
+  OUTPUT_LIMIT_MESSAGE,
+} from './execution-protocol';
 
 interface WorkerRequest {
   code: string;
   language: 'c' | 'cpp';
   stdinBuffer: SharedArrayBuffer;
   stdin?: string;
+  requestId: string;
 }
 
 interface WorkerResponse {
-  success: boolean;
-  output: string;
+  type?: 'stream' | 'result';
+  requestId?: string;
+  stream?: 'stdout' | 'stderr';
+  text?: string;
+  attempt?: number;
+  status?: 'completed' | 'failed' | 'output-limit';
+  success?: boolean;
+  output?: string;
   error?: string;
   exitCode?: number | null;
 }
-
-const decoder = new TextDecoder();
 
 interface CompilerInvocation {
   compilerArgs: string[];
@@ -50,6 +66,73 @@ interface CompilerInvocation {
   linkerArgs: string[];
   linerArtifact: string;
 }
+
+const CONIO_COMPAT_HEADER = `
+#ifndef VALTON_X_CONIO_H
+#define VALTON_X_CONIO_H
+
+#include <stdio.h>
+
+#define BLACK 0
+#define BLUE 1
+#define GREEN 2
+#define CYAN 3
+#define RED 4
+#define MAGENTA 5
+#define BROWN 6
+#define LIGHTGRAY 7
+#define DARKGRAY 8
+#define LIGHTBLUE 9
+#define LIGHTGREEN 10
+#define LIGHTCYAN 11
+#define LIGHTRED 12
+#define LIGHTMAGENTA 13
+#define YELLOW 14
+#define WHITE 15
+
+static inline int getch(void) {
+  return getchar();
+}
+
+static inline int getche(void) {
+  int character = getchar();
+  if (character != EOF) {
+    putchar(character);
+  }
+  return character;
+}
+
+static inline int kbhit(void) {
+  return 0;
+}
+
+static inline void clrscr(void) {
+  fputs("\\033[2J\\033[H", stdout);
+}
+
+static inline void gotoxy(int column, int row) {
+  (void)column;
+  (void)row;
+}
+
+static inline void textcolor(int color) {
+  (void)color;
+}
+
+static inline void textbackground(int color) {
+  (void)color;
+}
+
+#define cprintf printf
+#define cputs puts
+#define putch putchar
+
+#endif
+`;
+
+const C_EXTRA_FILES = {
+  '/include/conio.h': CONIO_COMPAT_HEADER,
+};
 
 const getCCompilerInvocation = async (
   fileName: string,
@@ -66,7 +149,7 @@ const getCCompilerInvocation = async (
   });
 
   clang.FS.writeFile(fileName, source);
-  setUpSysroot(clang, sysroot);
+  setUpSysroot(clang, sysroot, C_EXTRA_FILES);
   clang.FS.mkdirTree('/lib/wasm32-wasi');
   clang.FS.mkdirTree('/include/c++/v1');
   clang.FS.writeFile(
@@ -148,7 +231,7 @@ const compileC = async (
   const clang = await clangPromise;
 
   clang.FS.writeFile(fileName, source);
-  setUpSysroot(clang, sysroot);
+  setUpSysroot(clang, sysroot, C_EXTRA_FILES);
 
   if (clang.callMain(invocation.compilerArgs) !== 0) {
     return { compileOutput: stderr, module: null };
@@ -161,7 +244,7 @@ const compileC = async (
   const lld = await lldPromise;
 
   lld.FS.writeFile(invocation.compilerArtifact, binary);
-  setUpSysroot(lld, sysroot);
+  setUpSysroot(lld, sysroot, C_EXTRA_FILES);
 
   if (lld.callMain(invocation.linkerArgs) !== 0) {
     return { compileOutput: stderr, module: null };
@@ -179,13 +262,11 @@ const compileC = async (
 };
 
 class SharedStdinFile extends OpenFile {
-  private readonly control: Int32Array;
-  private readonly data: Uint8Array;
+  private readonly stdin: ReturnType<typeof getSharedStdin>;
 
   public constructor(buffer: SharedArrayBuffer) {
     super(new File(new Uint8Array(), { readonly: true }));
-    this.control = new Int32Array(buffer, 0, 4);
-    this.data = new Uint8Array(buffer, 16);
+    this.stdin = getSharedStdin(buffer);
   }
 
   public override fd_read(size: number): {
@@ -193,22 +274,20 @@ class SharedStdinFile extends OpenFile {
     data: Uint8Array;
   } {
     while (true) {
-      const writePosition = Atomics.load(this.control, 0);
-      const readPosition = Atomics.load(this.control, 1);
-
-      if (readPosition < writePosition) {
-        const end = Math.min(readPosition + size, writePosition);
-        const chunk = this.data.slice(readPosition, end);
-        Atomics.store(this.control, 1, end);
-        return { ret: 0, data: chunk };
+      if (Atomics.load(this.stdin.control, 4) > 0) {
+        return {
+          ret: 0,
+          data: readSharedStdin(this.stdin, size),
+        };
       }
 
-      if (Atomics.load(this.control, 2) === 1) {
+      const state = Atomics.load(this.stdin.control, 2);
+      if (state === STDIN_CLOSED || state === STDIN_ABORTED) {
         return { ret: 0, data: new Uint8Array() };
       }
 
-      const version = Atomics.load(this.control, 3);
-      Atomics.wait(this.control, 3, version);
+      const version = Atomics.load(this.stdin.control, 3);
+      Atomics.wait(this.stdin.control, 3, version);
     }
   }
 }
@@ -220,20 +299,68 @@ class SharedStdinFile extends OpenFile {
 const runWasiModule = (
   module: WebAssembly.Module,
   stdinBuffer: SharedArrayBuffer,
-): { stdout: string; stderr: string; exitCode: number } => {
+  requestId: string,
+): {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  outputLimitReached: boolean;
+} => {
   let stdoutBuf = '';
   let stderrBuf = '';
+  let outputBytes = 0;
+  let outputLimitReached = false;
+  const stdoutDecoder = new TextDecoder();
+  const stderrDecoder = new TextDecoder();
+
+  const emit = (
+    stream: 'stdout' | 'stderr',
+    text: string,
+  ): void => {
+    if (!text || outputLimitReached) {
+      return;
+    }
+    const bytes = new TextEncoder().encode(text);
+    const remaining = MAX_OUTPUT_BYTES - outputBytes;
+    const visible = bytes.length <= remaining
+      ? text
+      : new TextDecoder().decode(bytes.slice(0, remaining));
+    outputBytes += new TextEncoder().encode(visible).length;
+    if (visible) {
+      self.postMessage({
+        type: 'stream',
+        requestId,
+        stream,
+        text: visible,
+        attempt: 1,
+      } satisfies WorkerResponse);
+    }
+    if (visible.length < text.length || outputBytes >= MAX_OUTPUT_BYTES) {
+      outputLimitReached = true;
+      self.postMessage({
+        type: 'stream',
+        requestId,
+        stream: 'stderr',
+        text: `\n${OUTPUT_LIMIT_MESSAGE}\n`,
+        attempt: 1,
+      } satisfies WorkerResponse);
+    }
+  };
 
   const fds = [
     // fd 0 – stdin: terminal-backed shared input
     new SharedStdinFile(stdinBuffer),
     // fd 1 – stdout
     new ConsoleStdout((chunk: Uint8Array) => {
-      stdoutBuf += decoder.decode(chunk);
+      const text = stdoutDecoder.decode(chunk, { stream: true });
+      if (!outputLimitReached) stdoutBuf += text;
+      emit('stdout', text);
     }),
     // fd 2 – stderr
     new ConsoleStdout((chunk: Uint8Array) => {
-      stderrBuf += decoder.decode(chunk);
+      const text = stderrDecoder.decode(chunk, { stream: true });
+      if (!outputLimitReached) stderrBuf += text;
+      emit('stderr', text);
     }),
     // fd 3 – preopened '.' directory (required by many C runtimes)
     new PreopenDirectory('.', new Map()),
@@ -273,13 +400,29 @@ const runWasiModule = (
     }
   }
 
-  return { stdout: stdoutBuf, stderr: stderrBuf, exitCode };
+  const remainingStdout = stdoutDecoder.decode();
+  const remainingStderr = stderrDecoder.decode();
+  if (remainingStdout) {
+    stdoutBuf += remainingStdout;
+    emit('stdout', remainingStdout);
+  }
+  if (remainingStderr) {
+    stderrBuf += remainingStderr;
+    emit('stderr', remainingStderr);
+  }
+
+  return {
+    stdout: stdoutBuf,
+    stderr: stderrBuf,
+    exitCode,
+    outputLimitReached,
+  };
 };
 
 self.onmessage = async (
   event: MessageEvent<WorkerRequest>,
 ): Promise<void> => {
-  const { code, language, stdinBuffer } = event.data;
+  const { code, language, stdinBuffer, requestId } = event.data;
 
   const fileName =
     language === 'cpp' ? 'main.cpp' : 'main.c';
@@ -322,6 +465,8 @@ self.onmessage = async (
     const msg =
       error instanceof Error ? error.message : String(error);
     const response: WorkerResponse = {
+      type: 'result',
+      requestId,
       success: false,
       output: '',
       error: `[Compiler internal error] ${msg}`,
@@ -336,6 +481,8 @@ self.onmessage = async (
   // Compilation failed (module is null) – send compiler diagnostics.
   if (!module) {
     const response: WorkerResponse = {
+      type: 'result',
+      requestId,
       success: false,
       output: compileOutput,
       error: compileOutput || 'Compilation failed with no diagnostic output.',
@@ -350,15 +497,22 @@ self.onmessage = async (
     stdout: string;
     stderr: string;
     exitCode: number;
+    outputLimitReached: boolean;
   };
 
   try {
-    executionResult = runWasiModule(module, stdinBuffer);
+    executionResult = runWasiModule(
+      module,
+      stdinBuffer,
+      requestId,
+    );
   } catch (error: unknown) {
     const message =
       error instanceof Error ? error.message : String(error);
 
     self.postMessage({
+      type: 'result',
+      requestId,
       success: false,
       output: '',
       error: `[C/C++ runtime error] ${message}`,
@@ -367,7 +521,12 @@ self.onmessage = async (
     return;
   }
 
-  const { stdout, stderr, exitCode } = executionResult;
+  const {
+    stdout,
+    stderr,
+    exitCode,
+    outputLimitReached,
+  } = executionResult;
 
   // Combine stdout + stderr into a single output string so the terminal
   // receives them in a reasonable order.  stderr is appended after stdout
@@ -379,11 +538,44 @@ self.onmessage = async (
     : stdout;
 
   const response: WorkerResponse = {
+    type: 'result',
+    requestId,
     success: exitCode === 0,
-    output: combinedOutput,
-    error: exitCode !== 0 ? (stderr || compileOutput || 'Non-zero exit code.') : undefined,
+    output: outputLimitReached
+      ? OUTPUT_LIMIT_MESSAGE
+      : combinedOutput,
+    error: outputLimitReached
+      ? OUTPUT_LIMIT_MESSAGE
+      : exitCode !== 0
+        ? (stderr || compileOutput || 'Non-zero exit code.')
+        : undefined,
+    status: outputLimitReached
+      ? 'output-limit'
+      : exitCode === 0
+        ? 'completed'
+        : 'failed',
     exitCode,
   };
 
   self.postMessage(response);
+
+
+
+
 };
+
+// ==== NEW: stop handling ==== //
+self.addEventListener(
+  'message',
+  (event: MessageEvent<{ type?: string; stdinBuffer?: SharedArrayBuffer }>) => {
+  if (event.data.type === 'stop') {
+    const buffer = event.data.stdinBuffer;
+    if (buffer) {
+      closeSharedStdin(
+        getSharedStdin(buffer),
+        STDIN_ABORTED,
+      );
+    }
+  }
+  },
+);

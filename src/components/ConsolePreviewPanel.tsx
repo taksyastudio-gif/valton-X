@@ -5,11 +5,10 @@ import {
   Trash2,
 } from 'lucide-react';
 import type { FC } from 'react';
-
-import { FriendlyErrorPanel } from './FriendlyErrorPanel';
+import { useEffect, useState } from 'react';
 import { InteractiveTerminal } from './InteractiveTerminal';
 import { buildWebPreview } from '../utils/webPreview';
-
+import { ErrorModal } from './ErrorModal';
 import type {
   EditorTheme,
   FileItem,
@@ -32,6 +31,8 @@ interface ConsolePreviewPanelProps {
   onClearError?: () => void;
 
   onSendInput: (input: string) => void;
+  onInterrupt?: () => void;
+  onEof?: () => void;
   onClearTerminal: () => void;
   isWaitingForInput?: boolean;
   executionStatus: ExecutionStatus;
@@ -115,6 +116,8 @@ export const ConsolePreviewPanel: FC<
   onJumpToError,
   onClearError,
   onSendInput,
+  onInterrupt,
+  onEof,
   onClearTerminal,
   isWaitingForInput = false,
   executionStatus,
@@ -122,6 +125,13 @@ export const ConsolePreviewPanel: FC<
   terminalPosition,
   onTerminalPositionChange,
 }) => {
+  const [showErrorModal, setShowErrorModal] = useState(false);
+
+  useEffect(() => {
+    // Automatically open the Doctor only when a new runtime error arrives.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setShowErrorModal(Boolean(errorOutput.trim()));
+  }, [errorOutput]);
   const isWebPreview =
     activeLanguage === 'html' ||
     activeLanguage === 'css' ||
@@ -273,27 +283,53 @@ export const ConsolePreviewPanel: FC<
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-          {errorOutput.trim() ? (
-            <div className="min-h-0 max-h-[58%] shrink-0 overflow-y-auto border-b border-theme px-2 pt-2">
-              <FriendlyErrorPanel
-                fileName={errorFileName}
-                language={activeLanguage}
-                onClear={onClearError}
-                onJumpToError={onJumpToError}
-                rawError={errorOutput}
-              />
-            </div>
-          ) : null}
-
-          <div className="min-h-0 flex-1 overflow-hidden">
-            <InteractiveTerminal
-              clearGeneration={clearGeneration}
-              isWaitingForInput={isWaitingForInput}
-              onInput={onSendInput}
-              terminalLogs={terminalLogs}
-              theme={activeTheme}
-            />
-          </div>
+    {/* Error handling – show a button to open modal */}
+    {errorOutput.trim() ? (
+      <div className="flex items-center gap-2 mb-2">
+        <button
+          className="primary-action inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-semibold"
+          onClick={() => setShowErrorModal(true)}
+          type="button"
+        >
+          Open Doctor check-up
+        </button>
+        {/* Optional clear error button */}
+        {onClearError ? (
+          <button
+            className="icon-action rounded p-1"
+            onClick={onClearError}
+            aria-label="Dismiss error"
+            title="Dismiss error"
+            type="button"
+          >
+            <span aria-hidden="true">×</span>
+          </button>
+        ) : null}
+      </div>
+    ) : null}
+    {/* Doctor modal */}
+    <ErrorModal
+      isOpen={showErrorModal}
+      onClose={() => setShowErrorModal(false)}
+      rawError={errorOutput}
+      language={activeLanguage}
+      fileName={errorFileName}
+      onJumpToError={onJumpToError}
+      onClear={onClearError}
+    />
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <InteractiveTerminal
+          clearGeneration={clearGeneration}
+          isWaitingForInput={isWaitingForInput}
+          onInput={onSendInput}
+          onInterrupt={onInterrupt}
+          onEof={onEof}
+          terminalLogs={terminalLogs}
+          theme={activeTheme}
+        />
+      </div>
+    </div>
         </div>
       )}
     </section>

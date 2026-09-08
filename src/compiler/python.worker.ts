@@ -6,9 +6,22 @@ import type {
   RuntimeRequest,
 } from './execution-protocol';
 import type { loadPyodide } from 'pyodide';
+import {
+  closeSharedStdin,
+  getSharedStdin,
+  readSharedStdin,
+  STDIN_ABORTED,
+  STDIN_CLOSED,
+} from './shared-stdin';
+import {
+  MAX_OUTPUT_BYTES,
+  OUTPUT_LIMIT_MESSAGE,
+} from './execution-protocol';
 
 const PYODIDE_BASE_URL = '/pyodide/';
-const PYODIDE_VERSION = '0.25.1';
+const SQLITE_PACKAGE_NAME = 'sqlite3';
+const SQLITE_PACKAGE_URL =
+  `${PYODIDE_BASE_URL}sqlite3-1.0.0.zip`;
 const STDIN_REQUIRED_MARKER = '__FORGEBYTEX_STDIN_REQUIRED__';
 
 type LoadPyodide = typeof loadPyodide;
@@ -142,58 +155,56 @@ const ensurePythonPackages = async (
     return;
   }
 
-  await pyodide.loadPackage(
-    `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/sqlite3-1.0.0.zip`,
-  );
+  try {
+    await pyodide.loadPackage(SQLITE_PACKAGE_NAME);
+  } catch (error: unknown) {
+    const message =
+      error instanceof Error ? error.message : String(error);
+
+    throw new Error(
+      `The local SQLite package could not be loaded. ` +
+      `Make sure ${SQLITE_PACKAGE_URL} is deployed. ${message}`,
+      { cause: error },
+    );
+  }
 };
 
 class SharedStdinReader {
-  private readonly control: Int32Array;
-  private readonly data: Uint8Array;
+  private readonly stdin: ReturnType<typeof getSharedStdin>;
   private readonly decoder = new TextDecoder();
+  private bufferedText = '';
 
   constructor(buffer: SharedArrayBuffer) {
-    this.control = new Int32Array(buffer, 0, 4);
-    this.data = new Uint8Array(buffer, 16);
+    this.stdin = getSharedStdin(buffer);
   }
 
   public readLine(): string {
     while (true) {
-      const writePosition = Atomics.load(this.control, 0);
-      const readPosition = Atomics.load(this.control, 1);
-
-      for (
-        let index = readPosition;
-        index < writePosition;
-        index += 1
-      ) {
-        if (this.data[index] !== 10) {
-          continue;
-        }
-
-        const line = this.decoder.decode(
-          this.data.slice(readPosition, index),
+      const bufferedNewline = this.bufferedText.indexOf('\n');
+      if (bufferedNewline >= 0) {
+        const line = this.bufferedText.slice(0, bufferedNewline);
+        this.bufferedText = this.bufferedText.slice(
+          bufferedNewline + 1,
         );
-
-        Atomics.store(this.control, 1, index + 1);
         return line;
       }
 
-      if (Atomics.load(this.control, 2) === 1) {
-        if (readPosition < writePosition) {
-          const remaining = this.decoder.decode(
-            this.data.slice(readPosition, writePosition),
-          );
-
-          Atomics.store(this.control, 1, writePosition);
-          return remaining;
-        }
-
-        return '';
+      const available = Atomics.load(this.stdin.control, 4);
+      if (available > 0) {
+        const chunk = readSharedStdin(this.stdin, available);
+        this.bufferedText += this.decoder.decode(chunk);
+        continue;
       }
 
-      const version = Atomics.load(this.control, 3);
-      Atomics.wait(this.control, 3, version);
+      const state = Atomics.load(this.stdin.control, 2);
+      if (state === STDIN_CLOSED || state === STDIN_ABORTED) {
+        const remaining = this.bufferedText;
+        this.bufferedText = '';
+        return remaining;
+      }
+
+      const version = Atomics.load(this.stdin.control, 3);
+      Atomics.wait(this.stdin.control, 3, version);
     }
   }
 }
@@ -206,6 +217,8 @@ const runPython = async (
   const pyodide = await getPyodideRuntime();
   await ensurePythonPackages(pyodide, session.code);
   const outputChunks: string[] = [];
+  let outputBytes = 0;
+  let outputLimitReached = false;
   const sharedStdin = session.stdinBuffer
     ? new SharedStdinReader(session.stdinBuffer)
     : null;
@@ -214,12 +227,29 @@ const runPython = async (
   let stdinRequested = false;
 
   const emit = (stream: OutputStream, text: string): void => {
-    if (!text) {
+    if (!text || outputLimitReached) {
       return;
     }
 
-    outputChunks.push(text);
-    postStream(requestId, stream, text, attempt);
+    const bytes = new TextEncoder().encode(text);
+    const remaining = MAX_OUTPUT_BYTES - outputBytes;
+    const visible = bytes.length <= remaining
+      ? text
+      : new TextDecoder().decode(bytes.slice(0, remaining));
+    outputBytes += new TextEncoder().encode(visible).length;
+    if (visible) {
+      outputChunks.push(visible);
+      postStream(requestId, stream, visible, attempt);
+    }
+    if (visible.length < text.length || outputBytes >= MAX_OUTPUT_BYTES) {
+      outputLimitReached = true;
+      postStream(
+        requestId,
+        'stderr',
+        `\n${OUTPUT_LIMIT_MESSAGE}\n`,
+        attempt,
+      );
+    }
   };
 
   pyodide.setStdout({
@@ -280,11 +310,16 @@ const runPython = async (
     }
 
     return {
-      success: true,
-      output: outputChunks.join(''),
-      exitCode: 0,
+      success: !outputLimitReached,
+      output: outputLimitReached
+        ? OUTPUT_LIMIT_MESSAGE
+        : outputChunks.join(''),
+      error: outputLimitReached
+        ? OUTPUT_LIMIT_MESSAGE
+        : undefined,
+      exitCode: outputLimitReached ? 1 : 0,
       waitingForInput: false,
-      status: 'completed',
+      status: outputLimitReached ? 'output-limit' : 'completed',
       phase: 'run',
     };
   } catch (error: unknown) {
@@ -342,6 +377,17 @@ const finishSession = (
     session.attempt += 1;
   } else {
     executionSessions.delete(requestId);
+    // Cleanup stdin buffer after normal completion
+    if (session.stdinBuffer) {
+      try {
+        closeSharedStdin(
+          getSharedStdin(session.stdinBuffer),
+          STDIN_CLOSED,
+        );
+      } catch (error: unknown) {
+        console.warn('Unable to close Python stdin buffer.', error);
+      }
+    }
   }
 };
 
@@ -420,6 +466,18 @@ self.addEventListener(
     const request = event.data;
 
     if (!request) {
+      return;
+    }
+
+    // Stop handling – abort any pending stdin reads
+    if (request.type === 'stop') {
+      const buffer = request.stdinBuffer;
+      if (buffer) {
+        closeSharedStdin(
+          getSharedStdin(buffer),
+          STDIN_ABORTED,
+        );
+      }
       return;
     }
 

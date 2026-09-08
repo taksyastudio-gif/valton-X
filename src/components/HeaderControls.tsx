@@ -11,12 +11,17 @@ import type { FC } from 'react';
 
 import { FirebaseAuthButton } from './FirebaseAuthButton';
 import type { EditorTheme } from '../types/byteplay';
+import type { SupportedLanguage } from '../types/byteplay';
+
+type LanguageFilter = SupportedLanguage | 'all';
 
 interface HeaderControlsProps {
   isRunning: boolean;
   activeTheme: EditorTheme;
+  languageFilter: LanguageFilter;
 
   onThemeChange: (theme: EditorTheme) => void;
+  onLanguageFilterChange: (language: LanguageFilter) => void;
   onRun: () => void;
   onClear: () => void;
   onReset: () => void;
@@ -27,6 +32,8 @@ interface HeaderControlsProps {
 export const HeaderControls: FC<HeaderControlsProps> = ({
   isRunning,
   activeTheme,
+  languageFilter,
+  onLanguageFilterChange,
   onThemeChange,
   onRun,
   onClear,
@@ -104,6 +111,34 @@ export const HeaderControls: FC<HeaderControlsProps> = ({
               <option value="black">Black</option>
               <option value="white">White</option>
               <option value="cyberpunk">Cyberpunk</option>
+            </select>
+          </label>
+
+          <label
+            className="secondary-action flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium"
+            title="Filter Explorer files by language"
+          >
+            <span className="hidden sm:inline">Files</span>
+            <span className="sr-only">Explorer language filter</span>
+            <select
+              aria-label="Explorer language filter"
+              className="max-w-24 cursor-pointer bg-transparent text-xs outline-none sm:max-w-28"
+              onChange={(event) =>
+                onLanguageFilterChange(
+                  event.target.value as LanguageFilter,
+                )
+              }
+              value={languageFilter}
+            >
+              <option value="all">All languages</option>
+              <option value="c">C</option>
+              <option value="cpp">C++</option>
+              <option value="python">Python</option>
+              <option value="html">HTML</option>
+              <option value="css">CSS</option>
+              <option value="javascript">JavaScript</option>
+              <option value="sql">SQL</option>
+              <option value="plaintext">Text</option>
             </select>
           </label>
 

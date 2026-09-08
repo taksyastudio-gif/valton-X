@@ -4,6 +4,12 @@ import type {
   RuntimeEvent,
 } from './execution-protocol';
 import type { ExecutionCallbacks } from './execution-client';
+import {
+  createSharedStdin,
+  closeSharedStdin,
+  getSharedStdin,
+  writeSharedStdin,
+} from './shared-stdin';
 
 interface PendingExecution {
   resolve: (result: ExecutionResult) => void;
@@ -23,6 +29,8 @@ export class PythonClient {
   private activeRequestId: string | null = null;
   private pendingExecution: PendingExecution | null = null;
   private stdinBuffer: SharedArrayBuffer | null = null;
+  private pendingInput: Uint8Array[] = [];
+  private flushTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     this.initializeWorker();
@@ -146,6 +154,7 @@ export class PythonClient {
           language: 'python',
           stdinBuffer,
         });
+        this.startInputFlushing();
       } catch (error: unknown) {
         const message =
           error instanceof Error
@@ -167,24 +176,19 @@ export class PythonClient {
       return;
     }
 
-    const control = new Int32Array(this.stdinBuffer, 0, 4);
-    const data = new Uint8Array(this.stdinBuffer, 16);
-    const bytes = new TextEncoder().encode(
-      input.endsWith('\n') ? input : `${input}\n`,
+    this.pendingInput.push(
+      new TextEncoder().encode(
+        input.endsWith('\n') ? input : `${input}\n`,
+      ),
     );
-    const writePosition = Atomics.load(control, 0);
+    this.flushPendingInput();
+  }
 
-    if (writePosition + bytes.length > data.length) {
-      this.resolveWorkerFailure(
-        'Python input is larger than the terminal buffer.',
-      );
-      return;
+  public closeInput(): void {
+    if (this.stdinBuffer) {
+      closeSharedStdin(getSharedStdin(this.stdinBuffer));
+      this.pendingInput = [];
     }
-
-    data.set(bytes, writePosition);
-    Atomics.store(control, 0, writePosition + bytes.length);
-    Atomics.add(control, 3, 1);
-    Atomics.notify(control, 3);
   }
 
   public stopCurrent(): void {
@@ -194,9 +198,17 @@ export class PythonClient {
 
     const pendingExecution = this.pendingExecution;
 
+  // Send stop message to worker to ensure stdin buffer cleanup
+  if (this.worker && this.stdinBuffer) {
+    this.worker.postMessage({ type: 'stop', stdinBuffer: this.stdinBuffer });
+  }
+
     this.pendingExecution = null;
     this.activeRequestId = null;
     this.stdinBuffer = null;
+    this.stopInputFlushing();
+    this.pendingInput = [];
+    this.stopInputFlushing();
 
     pendingExecution.resolve({
       success: false,
@@ -277,6 +289,7 @@ export class PythonClient {
 
     const friendlyOutput = [
       `${insight.emoji} ${insight.humorousTitle}`,
+      `Doctor classification: ${insight.diagnosticType ?? 'unknown'}`,
       '',
       `What happened: ${insight.friendlyExplanation}`,
       `Quick fix: ${insight.suggestedFix}`,
@@ -356,24 +369,44 @@ export class PythonClient {
       );
     }
 
-    const buffer = new SharedArrayBuffer(16 + 65536);
-    const control = new Int32Array(buffer, 0, 4);
-    const data = new Uint8Array(buffer, 16);
-    const initialBytes = new TextEncoder().encode(
+    return createSharedStdin(
       initialInput
         ? initialInput.endsWith('\n')
           ? initialInput
           : `${initialInput}\n`
         : '',
-    );
+    ).buffer;
+  }
 
-    if (initialBytes.length > data.length) {
-      throw new Error('Python input is larger than the terminal buffer.');
+  private flushPendingInput(): void {
+    if (!this.stdinBuffer) {
+      return;
     }
 
-    data.set(initialBytes);
-    Atomics.store(control, 0, initialBytes.length);
-    return buffer;
+    const stdin = getSharedStdin(this.stdinBuffer);
+    while (this.pendingInput.length > 0) {
+      const input = this.pendingInput[0];
+      const written = writeSharedStdin(stdin, input);
+      if (written < input.length) {
+        this.pendingInput[0] = input.slice(written);
+        return;
+      }
+      this.pendingInput.shift();
+    }
+  }
+
+  private startInputFlushing(): void {
+    this.stopInputFlushing();
+    this.flushTimer = setInterval(() => {
+      this.flushPendingInput();
+    }, 25);
+  }
+
+  private stopInputFlushing(): void {
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
   }
 }
 

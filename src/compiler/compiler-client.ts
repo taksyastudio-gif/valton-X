@@ -3,6 +3,13 @@ import type {
   SupportedLanguage,
 } from './execution-protocol';
 import type { ExecutionCallbacks } from './execution-client';
+import {
+  closeSharedStdin,
+  createSharedStdin,
+  getSharedStdin,
+  writeSharedStdin,
+  STDIN_ABORTED,
+} from './shared-stdin';
 
 export type { ExecutionResult } from './execution-protocol';
 
@@ -15,12 +22,19 @@ interface CWorkerRequest {
   /** Shared terminal stdin buffer used by the WASI worker. */
   stdinBuffer: SharedArrayBuffer;
   stdin: string;
+  requestId: string;
 }
 
 /**
  * Response received from the C/C++ WASM worker.
  */
 interface CWorkerResponse {
+  type?: 'stream' | 'result';
+  requestId?: string;
+  stream?: 'stdout' | 'stderr';
+  text?: string;
+  attempt?: number;
+  status?: 'completed' | 'failed' | 'output-limit';
   success: boolean;
   output: string;
   error?: string;
@@ -43,6 +57,8 @@ export class CompilerClient {
   private worker: Worker | null = null;
   private stdinBuffer: SharedArrayBuffer | null = null;
   private activeRequest = false;
+  private pendingInput: Uint8Array[] = [];
+  private flushTimer: ReturnType<typeof setInterval> | null = null;
 
   public async compileAndRun(
     code: string,
@@ -82,6 +98,7 @@ export class CompilerClient {
     return new Promise((resolve) => {
       let settled = false;
       let timeoutId: ReturnType<typeof setTimeout> | null = null;
+      let streamedOutput = false;
 
       const worker = new Worker(
         new URL('./compiler.worker.ts', import.meta.url),
@@ -101,6 +118,7 @@ export class CompilerClient {
           timeoutId = null;
         }
         worker.terminate();
+        this.stopInputFlushing();
 
         if (this.worker === worker) {
           this.worker = null;
@@ -113,13 +131,26 @@ export class CompilerClient {
         event: MessageEvent<CWorkerResponse>,
       ): void => {
         const data = event.data;
+        if (
+          data.type === 'stream' &&
+          data.stream &&
+          data.text
+        ) {
+          streamedOutput = true;
+          callbacks?.onOutput?.(
+            data.stream,
+            data.text,
+            data.attempt ?? 1,
+          );
+          return;
+        }
         const output = data.output ?? '';
         const terminalOutput =
           data.success && !output
             ? 'Program completed with no output.'
             : output;
 
-        if (terminalOutput) {
+        if (terminalOutput && !streamedOutput) {
           callbacks?.onOutput?.('stdout', terminalOutput, 1);
         }
 
@@ -128,7 +159,7 @@ export class CompilerClient {
           output: terminalOutput,
           error: data.success ? undefined : (data.error ?? 'C/C++ execution failed.'),
           exitCode: data.exitCode ?? (data.success ? 0 : 1),
-          status: data.success ? 'completed' : 'failed',
+          status: data.status ?? (data.success ? 'completed' : 'failed'),
           phase: data.success ? 'run' : 'compile',
         });
       };
@@ -154,9 +185,11 @@ export class CompilerClient {
           language: (language === 'cpp' ? 'cpp' : 'c') as 'c' | 'cpp',
           stdinBuffer,
           stdin,
+          requestId: this.createRequestId(),
         };
 
         worker.postMessage(request);
+        this.startInputFlushing();
 
         timeoutId = setTimeout(() => {
           finish({
@@ -190,32 +223,32 @@ export class CompilerClient {
       return;
     }
 
-    const control = new Int32Array(this.stdinBuffer, 0, 4);
-    const data = new Uint8Array(this.stdinBuffer, 16);
-    const bytes = new TextEncoder().encode(
-      input.endsWith('\n') ? input : `${input}\n`,
+    this.pendingInput.push(
+      new TextEncoder().encode(
+        input.endsWith('\n') ? input : `${input}\n`,
+      ),
     );
-    const writePosition = Atomics.load(control, 0);
+    this.flushPendingInput();
+  }
 
-    if (writePosition + bytes.length > data.length) {
-      return;
+  public closeInput(): void {
+    if (this.stdinBuffer) {
+      closeSharedStdin(getSharedStdin(this.stdinBuffer));
+      this.pendingInput = [];
     }
-
-    data.set(bytes, writePosition);
-    Atomics.store(control, 0, writePosition + bytes.length);
-    Atomics.add(control, 3, 1);
-    Atomics.notify(control, 3);
   }
 
   public stopCurrent(): void {
     if (this.stdinBuffer) {
-      const control = new Int32Array(this.stdinBuffer, 0, 4);
-      Atomics.store(control, 2, 1);
-      Atomics.add(control, 3, 1);
-      Atomics.notify(control, 3);
+      closeSharedStdin(
+        getSharedStdin(this.stdinBuffer),
+        STDIN_ABORTED,
+      );
       this.stdinBuffer = null;
     }
 
+    this.pendingInput = [];
+    this.stopInputFlushing();
     this.worker?.terminate();
     this.worker = null;
     this.activeRequest = false;
@@ -232,24 +265,49 @@ export class CompilerClient {
       );
     }
 
-    const buffer = new SharedArrayBuffer(16 + 65536);
-    const control = new Int32Array(buffer, 0, 4);
-    const data = new Uint8Array(buffer, 16);
-    const initialBytes = new TextEncoder().encode(
+    const stdin = createSharedStdin(
       initialInput
         ? initialInput.endsWith('\n')
           ? initialInput
           : `${initialInput}\n`
         : '',
     );
+    return stdin.buffer;
+  }
 
-    if (initialBytes.length > data.length) {
-      throw new Error('C/C++ input is larger than the terminal buffer.');
+  private flushPendingInput(): void {
+    if (!this.stdinBuffer) {
+      return;
     }
 
-    data.set(initialBytes);
-    Atomics.store(control, 0, initialBytes.length);
-    return buffer;
+    const stdin = getSharedStdin(this.stdinBuffer);
+    while (this.pendingInput.length > 0) {
+      const input = this.pendingInput[0];
+      const written = writeSharedStdin(stdin, input);
+      if (written < input.length) {
+        this.pendingInput[0] = input.slice(written);
+        return;
+      }
+      this.pendingInput.shift();
+    }
+  }
+
+  private startInputFlushing(): void {
+    this.stopInputFlushing();
+    this.flushTimer = setInterval(() => {
+      this.flushPendingInput();
+    }, 25);
+  }
+
+  private stopInputFlushing(): void {
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+  }
+
+  private createRequestId(): string {
+    return `c-run-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   }
 }
 
