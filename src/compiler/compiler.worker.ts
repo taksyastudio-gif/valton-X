@@ -13,7 +13,13 @@
  * WASI program is blocked in scanf/getchar.
  */
 
-import { compile } from 'browsercc';
+import {
+  Clang,
+  LLD,
+  compile,
+  setUpSysroot,
+} from 'browsercc';
+import sysrootUrl from 'browsercc/dist/sysroot.tar?url';
 import {
   WASI,
   File,
@@ -37,6 +43,140 @@ interface WorkerResponse {
 }
 
 const decoder = new TextDecoder();
+
+interface CompilerInvocation {
+  compilerArgs: string[];
+  compilerArtifact: string;
+  linkerArgs: string[];
+  linerArtifact: string;
+}
+
+const getCCompilerInvocation = async (
+  fileName: string,
+  source: string,
+  flags: string[],
+  sysroot: ArrayBuffer,
+): Promise<CompilerInvocation> => {
+  let stderr = '';
+  const clang = await Clang({
+    thisProgram: 'clang',
+    printErr: (data: string) => {
+      stderr += `${data}\n`;
+    },
+  });
+
+  clang.FS.writeFile(fileName, source);
+  setUpSysroot(clang, sysroot);
+  clang.FS.mkdirTree('/lib/wasm32-wasi');
+  clang.FS.mkdirTree('/include/c++/v1');
+  clang.FS.writeFile(
+    '/lib/wasm32-wasi/crt1-command.o',
+    new Uint8Array(0),
+  );
+  clang.FS.writeFile(
+    '/lib/wasm32-wasi/crt1-reactor.o',
+    new Uint8Array(0),
+  );
+
+  const exitCode = clang.callMain([
+    fileName,
+    ...flags,
+    '-###',
+  ]);
+
+  if (exitCode !== 0) {
+    throw new Error(
+      stderr || `Clang driver failed with code ${exitCode}.`,
+    );
+  }
+
+  const lines = stderr.split('\n');
+  const getArgs = (key: string): {
+    args: string[];
+    outputFileName: string;
+  } => {
+    const line = lines.find((entry) => entry.includes(key)) ?? '';
+    const args = (line.match(/"([^"]*)"/g) ?? [])
+      .map((value) => value.slice(1, -1))
+      .slice(1);
+    const outputIndex = args.findIndex(
+      (arg) => arg === '-o',
+    );
+
+    return {
+      args,
+      outputFileName: args[outputIndex + 1] ?? '',
+    };
+  };
+
+  const compiler = getArgs('-cc1');
+  const linker = getArgs('wasm-ld');
+
+  return {
+    compilerArgs: compiler.args,
+    compilerArtifact: compiler.outputFileName,
+    linkerArgs: linker.args,
+    linerArtifact: linker.outputFileName,
+  };
+};
+
+const compileC = async (
+  source: string,
+  fileName: string,
+  flags: string[],
+): Promise<{ compileOutput: string; module: WebAssembly.Module | null }> => {
+  let stderr = '';
+  const clangPromise = Clang({
+    thisProgram: 'clang',
+    printErr: (data: string) => {
+      stderr += `${data}\n`;
+    },
+  });
+  const lldPromise = LLD({
+    thisProgram: 'wasm-ld',
+    printErr: (data: string) => {
+      stderr += `${data}\n`;
+    },
+  });
+  const sysroot = await (await fetch(sysrootUrl)).arrayBuffer();
+  const invocation = await getCCompilerInvocation(
+    fileName,
+    source,
+    flags,
+    sysroot,
+  );
+  const clang = await clangPromise;
+
+  clang.FS.writeFile(fileName, source);
+  setUpSysroot(clang, sysroot);
+
+  if (clang.callMain(invocation.compilerArgs) !== 0) {
+    return { compileOutput: stderr, module: null };
+  }
+
+  const binary = clang.FS.readFile(
+    invocation.compilerArtifact,
+    { encoding: 'binary' },
+  );
+  const lld = await lldPromise;
+
+  lld.FS.writeFile(invocation.compilerArtifact, binary);
+  setUpSysroot(lld, sysroot);
+
+  if (lld.callMain(invocation.linkerArgs) !== 0) {
+    return { compileOutput: stderr, module: null };
+  }
+
+  const output = lld.FS.readFile(
+    invocation.linerArtifact,
+    { encoding: 'binary' },
+  );
+
+  return {
+    compileOutput: stderr,
+    module: await WebAssembly.compile(output),
+  };
+};
 
 class SharedStdinFile extends OpenFile {
   private readonly control: Int32Array;
@@ -148,6 +288,8 @@ self.onmessage = async (
   const flags =
     language === 'cpp'
       ? [
+          '--target=wasm32-wasi',
+          '--sysroot=/',
           '-x',
           'c++',
           '-std=c++17',
@@ -155,12 +297,23 @@ self.onmessage = async (
           '-Wall',
           '-fno-exceptions',
         ]
-      : ['-x', 'c++', '-std=c++17', '-O1', '-Wall'];
+      : [
+          '--target=wasm32-wasi',
+          '--sysroot=/',
+          '-x',
+          'c',
+          '-std=c17',
+          '-O1',
+          '-Wall',
+        ];
 
   let compileResult: { compileOutput: string; module: WebAssembly.Module | null };
 
   try {
-    const result = await compile({ source: code, fileName, flags });
+    const result =
+      language === 'c'
+        ? await compileC(code, fileName, flags)
+        : await compile({ source: code, fileName, flags });
     compileResult = {
       compileOutput: result.compileOutput ?? '',
       module: result.module,

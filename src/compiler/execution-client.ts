@@ -183,6 +183,12 @@ export class ExecutionClient {
     language: SupportedLanguage,
     fileName: string,
   ): SupportedLanguage {
+    // The Explorer language selector is the source of truth. Extension
+    // detection is only a fallback for files that are still plain text.
+    if (language !== 'plaintext') {
+      return language;
+    }
+
     const extension = fileName
       .split('.')
       .pop()

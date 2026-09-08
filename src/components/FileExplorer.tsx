@@ -30,6 +30,7 @@ interface FileExplorerProps {
   onSelectFile: (id: string) => void;
   onAddFile: (name?: string) => void;
   onRenameFile: (id: string, newName: string) => void;
+  onChangeLanguage: (id: string, language: SupportedLanguage) => void;
   onDeleteFile: (id: string) => void;
 }
 
@@ -39,6 +40,7 @@ export const FileExplorer: FC<FileExplorerProps> = ({
   onSelectFile,
   onAddFile,
   onRenameFile,
+  onChangeLanguage,
   onDeleteFile,
 }) => {
   const [editingFileId, setEditingFileId] = useState<string | null>(null);
@@ -238,6 +240,31 @@ export const FileExplorer: FC<FileExplorerProps> = ({
                     </span>
                   )}
                 </div>
+
+                <select
+                  aria-label={`Language for ${file.name}`}
+                  className="input-field max-w-20 rounded border px-1 py-0.5 text-[10px] outline-none"
+                  name={`language-${file.id}`}
+                  onChange={(event) => {
+                    event.stopPropagation();
+                    onChangeLanguage(
+                      file.id,
+                      event.target.value as SupportedLanguage,
+                    );
+                  }}
+                  onClick={(event) => event.stopPropagation()}
+                  title={`Language for ${file.name}`}
+                  value={file.language}
+                >
+                  <option value="c">C</option>
+                  <option value="cpp">C++</option>
+                  <option value="python">Python</option>
+                  <option value="html">HTML</option>
+                  <option value="css">CSS</option>
+                  <option value="javascript">JavaScript</option>
+                  <option value="sql">SQL</option>
+                  <option value="plaintext">Text</option>
+                </select>
 
                 {!isEditing ? (
                   <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">

@@ -22,6 +22,7 @@ export class PythonClient {
   private worker: Worker | null = null;
   private activeRequestId: string | null = null;
   private pendingExecution: PendingExecution | null = null;
+  private stdinBuffer: SharedArrayBuffer | null = null;
 
   constructor() {
     this.initializeWorker();
@@ -134,12 +135,16 @@ export class PythonClient {
       };
 
       try {
+        const stdinBuffer = this.createStdinBuffer(stdin);
+        this.stdinBuffer = stdinBuffer;
+
         this.worker?.postMessage({
           type: 'compile',
           requestId,
           code,
           stdin,
           language: 'python',
+          stdinBuffer,
         });
       } catch (error: unknown) {
         const message =
@@ -156,25 +161,30 @@ export class PythonClient {
     if (
       !this.worker ||
       !this.activeRequestId ||
-      !this.pendingExecution
+      !this.pendingExecution ||
+      !this.stdinBuffer
     ) {
       return;
     }
 
-    try {
-      this.worker.postMessage({
-        type: 'stdin',
-        requestId: this.activeRequestId,
-        input,
-      });
-    } catch (error: unknown) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : 'Unable to send input to the Python worker.';
+    const control = new Int32Array(this.stdinBuffer, 0, 4);
+    const data = new Uint8Array(this.stdinBuffer, 16);
+    const bytes = new TextEncoder().encode(
+      input.endsWith('\n') ? input : `${input}\n`,
+    );
+    const writePosition = Atomics.load(control, 0);
 
-      this.resolveWorkerFailure(message);
+    if (writePosition + bytes.length > data.length) {
+      this.resolveWorkerFailure(
+        'Python input is larger than the terminal buffer.',
+      );
+      return;
     }
+
+    data.set(bytes, writePosition);
+    Atomics.store(control, 0, writePosition + bytes.length);
+    Atomics.add(control, 3, 1);
+    Atomics.notify(control, 3);
   }
 
   public stopCurrent(): void {
@@ -186,6 +196,7 @@ export class PythonClient {
 
     this.pendingExecution = null;
     this.activeRequestId = null;
+    this.stdinBuffer = null;
 
     pendingExecution.resolve({
       success: false,
@@ -237,6 +248,7 @@ export class PythonClient {
 
     this.pendingExecution = null;
     this.activeRequestId = null;
+    this.stdinBuffer = null;
     pendingExecution.resolve(result);
   }
 
@@ -296,6 +308,7 @@ export class PythonClient {
 
     this.pendingExecution = null;
     this.activeRequestId = null;
+    this.stdinBuffer = null;
 
     pendingExecution.callbacks?.onStatus?.(
       'infrastructure-error',
@@ -331,6 +344,36 @@ export class PythonClient {
 
     this.worker?.terminate();
     this.worker = null;
+  }
+
+  private createStdinBuffer(initialInput: string): SharedArrayBuffer {
+    if (
+      typeof SharedArrayBuffer === 'undefined' ||
+      !globalThis.crossOriginIsolated
+    ) {
+      throw new Error(
+        'Python interactive execution requires a cross-origin-isolated page.',
+      );
+    }
+
+    const buffer = new SharedArrayBuffer(16 + 65536);
+    const control = new Int32Array(buffer, 0, 4);
+    const data = new Uint8Array(buffer, 16);
+    const initialBytes = new TextEncoder().encode(
+      initialInput
+        ? initialInput.endsWith('\n')
+          ? initialInput
+          : `${initialInput}\n`
+        : '',
+    );
+
+    if (initialBytes.length > data.length) {
+      throw new Error('Python input is larger than the terminal buffer.');
+    }
+
+    data.set(initialBytes);
+    Atomics.store(control, 0, initialBytes.length);
+    return buffer;
   }
 }
 

@@ -8,6 +8,7 @@ import type {
 import type { loadPyodide } from 'pyodide';
 
 const PYODIDE_BASE_URL = '/pyodide/';
+const PYODIDE_VERSION = '0.25.1';
 const STDIN_REQUIRED_MARKER = '__FORGEBYTEX_STDIN_REQUIRED__';
 
 type LoadPyodide = typeof loadPyodide;
@@ -131,6 +132,21 @@ const getPyodideRuntime = async (): Promise<PyodideRuntime> => {
   return pyodidePromise;
 };
 
+const ensurePythonPackages = async (
+  pyodide: PyodideRuntime,
+  code: string,
+): Promise<void> => {
+  // Pyodide keeps sqlite3 outside the standard library bundle. Load it only
+  // for programs that request it so normal Python startup stays fast.
+  if (!/\b(?:import\s+sqlite3|from\s+sqlite3\s+import)\b/.test(code)) {
+    return;
+  }
+
+  await pyodide.loadPackage(
+    `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/sqlite3-1.0.0.zip`,
+  );
+};
+
 class SharedStdinReader {
   private readonly control: Int32Array;
   private readonly data: Uint8Array;
@@ -188,6 +204,7 @@ const runPython = async (
 ): Promise<PythonRunResult> => {
   const attempt = session.attempt;
   const pyodide = await getPyodideRuntime();
+  await ensurePythonPackages(pyodide, session.code);
   const outputChunks: string[] = [];
   const sharedStdin = session.stdinBuffer
     ? new SharedStdinReader(session.stdinBuffer)

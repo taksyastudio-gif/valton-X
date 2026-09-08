@@ -114,14 +114,18 @@ export class CompilerClient {
       ): void => {
         const data = event.data;
         const output = data.output ?? '';
+        const terminalOutput =
+          data.success && !output
+            ? 'Program completed with no output.'
+            : output;
 
-        if (output) {
-          callbacks?.onOutput?.('stdout', output, 1);
+        if (terminalOutput) {
+          callbacks?.onOutput?.('stdout', terminalOutput, 1);
         }
 
         finish({
           success: data.success,
-          output,
+          output: terminalOutput,
           error: data.success ? undefined : (data.error ?? 'C/C++ execution failed.'),
           exitCode: data.exitCode ?? (data.success ? 0 : 1),
           status: data.success ? 'completed' : 'failed',

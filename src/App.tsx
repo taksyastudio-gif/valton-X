@@ -519,17 +519,23 @@ export const App = (): ReactElement => {
       setFiles((currentFiles) =>
         currentFiles.map((file) =>
           file.id === fileId
-            ? {
-                ...file,
-                name: trimmedName,
-                language:
-                  getLanguageFromFilename(trimmedName),
-                isWebProjectFile:
-                  isWebProjectFile({
-                    language:
-                      getLanguageFromFilename(trimmedName),
+            ? (() => {
+                const detectedLanguage =
+                  getLanguageFromFilename(trimmedName);
+                const language =
+                  detectedLanguage === 'plaintext'
+                    ? file.language
+                    : detectedLanguage;
+
+                return {
+                  ...file,
+                  name: trimmedName,
+                  language,
+                  isWebProjectFile: isWebProjectFile({
+                    language,
                   }),
-              }
+                };
+              })()
             : file,
         ),
       );
@@ -538,6 +544,27 @@ export const App = (): ReactElement => {
       setErrorOutput('');
     },
     [],
+  );
+
+  const handleChangeLanguage = useCallback(
+    (fileId: string, language: SupportedLanguage): void => {
+      setFiles((currentFiles) =>
+        currentFiles.map((file) =>
+          file.id === fileId
+            ? {
+                ...file,
+                language,
+                isWebProjectFile: isWebProjectFile({ language }),
+              }
+            : file,
+        ),
+      );
+
+      setHtmlPreviewDoc(null);
+      setErrorOutput('');
+      clearDiagnostics();
+    },
+    [clearDiagnostics],
   );
 
   const handleDeleteFile = useCallback(
@@ -823,7 +850,9 @@ export const App = (): ReactElement => {
             isWaitingForInput={
               executionStatus === 'waiting-input' ||
               (isRunning &&
-                (lang === 'c' || lang === 'cpp'))
+                (lang === 'c' ||
+                  lang === 'cpp' ||
+                  lang === 'python'))
             }
             onClearError={() => setErrorOutput('')}
             onClearTerminal={handleClearTerminal}
@@ -919,6 +948,7 @@ export const App = (): ReactElement => {
                     activeFileId={activeFile?.id ?? ''}
                     files={editorFiles}
                     onAddFile={handleAddFile}
+                    onChangeLanguage={handleChangeLanguage}
                     onDeleteFile={handleDeleteFile}
                     onRenameFile={handleRenameFile}
                     onSelectFile={handleSelectFile}
